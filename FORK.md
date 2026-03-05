@@ -117,6 +117,23 @@ Tick rates must not drift apart by more than two ticks per election
 timeout. Tests: `TestLeaseNeedsRecentRound`, `TestLeaseStartGuard`,
 `TestNoLeaseReadAfterTimeoutNow`.
 
+**Retried read requests (upstream fix, with a check added).** Upstream
+fixed this after v3.6.0 (etcd-io/raft commits 9b9d6ee and 63903dd), and
+this fork takes the fix by cherry-pick. A leader matched heartbeat
+responses to read requests by the request's own context. A client that
+retried a read with the same context, while heartbeat responses were
+delayed, could get its read confirmed by acknowledgements of an earlier
+request: a leader already cut off from the cluster then answered with a
+stale read index. Reads are now numbered by the leader, heartbeats carry
+the latest number, and a read is confirmed once a quorum has acknowledged a
+number at least as high.
+
+As upstream wrote it, a heartbeat response whose context was not 8 bytes
+long panicked the leader (`TestHostilePanicClasses` caught it). The fork
+ignores such contexts, and positions beyond the reads registered so far,
+which only a faulty peer sends. Tests: `TestReadOnlyDuplicateRequest`
+(upstream's), `TestHeartbeatAckContextChecked`.
+
 ## Liveness
 
 **A leader that leaves the voters hands over (`handOff`).** This was

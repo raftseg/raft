@@ -174,3 +174,43 @@ func TestInvalidLocalConfChangeDropped(t *testing.T) {
 		t.Fatal("ValidateConfChange accepted an unknown transition")
 	}
 }
+
+// Read acknowledgements are positions a leader numbers its read requests
+// with, sent in heartbeats and echoed back (see readOnly.heartbeatCtx).
+// A heartbeat response whose context is not such a position must neither
+// panic the leader nor confirm a read: upstream's decoder read 8 bytes from
+// any non-empty context, and a value beyond the positions issued would
+// confirm reads no heartbeat was sent for.
+func TestHeartbeatAckContextChecked(t *testing.T) {
+	r := newTestRaft(1, 10, 1, newTestMemoryStorage(withPeers(1, 2, 3)))
+	r.becomeCandidate()
+	r.becomeLeader()
+	r.raftLog.commitTo(r.raftLog.lastIndex())
+	r.Step(pb.Message{From: 2, To: 1, Type: pb.MsgReadIndex, Entries: []pb.Entry{{Data: []byte("ctx")}}})
+	hb := r.readMessages()
+	if len(hb) == 0 || hb[0].Type != pb.MsgHeartbeat || len(hb[0].Context) != 8 {
+		t.Fatalf("no numbered heartbeat: %+v", hb)
+	}
+	confirmed := func() bool {
+		for _, m := range r.readMessages() {
+			if m.Type == pb.MsgReadIndexResp {
+				return true
+			}
+		}
+		return false
+	}
+	beyond := append([]byte(nil), hb[0].Context...)
+	beyond[7] = 0xff
+	for _, ctx := range [][]byte{{1}, {1, 2, 3, 4, 5, 6, 7}, make([]byte, 9), beyond} {
+		if err := r.Step(pb.Message{From: 2, To: 1, Term: r.Term, Type: pb.MsgHeartbeatResp, Context: ctx}); err != nil {
+			t.Fatalf("context %x: %v", ctx, err)
+		}
+		if confirmed() {
+			t.Fatalf("context %x confirmed the read", ctx)
+		}
+	}
+	r.Step(pb.Message{From: 2, To: 1, Term: r.Term, Type: pb.MsgHeartbeatResp, Context: hb[0].Context})
+	if !confirmed() {
+		t.Fatal("a valid acknowledgement did not confirm the read")
+	}
+}

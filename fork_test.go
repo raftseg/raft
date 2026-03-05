@@ -152,17 +152,17 @@ func TestReadIndexAfterLeaderRemovedItself(t *testing.T) {
 		if len(r.readStates) != 0 {
 			t.Fatalf("%v: removed leader answered a read without asking the remaining voter: %v", option, r.readStates)
 		}
-		var asked bool
+		var asked []byte
 		for _, m := range r.readMessages() {
-			if m.Type == pb.MsgHeartbeat && m.To == 2 && string(m.Context) == "ctx" {
-				asked = true
+			if m.Type == pb.MsgHeartbeat && m.To == 2 && len(m.Context) > 0 {
+				asked = m.Context
 			}
 		}
-		if !asked {
+		if asked == nil {
 			t.Fatalf("%v: no heartbeat carrying the read to n2", option)
 		}
 		// Once n2 confirms the leadership, the read is answered.
-		if err := r.Step(pb.Message{From: 2, To: 1, Term: r.Term, Type: pb.MsgHeartbeatResp, Context: ctx}); err != nil {
+		if err := r.Step(pb.Message{From: 2, To: 1, Term: r.Term, Type: pb.MsgHeartbeatResp, Context: asked}); err != nil {
 			t.Fatal(err)
 		}
 		if len(r.readStates) != 1 || r.readStates[0].Index != r.raftLog.committed {
