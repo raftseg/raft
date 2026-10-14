@@ -11,16 +11,19 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the raftseg authors: import paths rewritten for this
+// fork's module and testify replaced by internal/testutil.
 
 package raft
 
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
+	"github.com/raftseg/raft/internal/testutil/assert"
+	"github.com/raftseg/raft/internal/testutil/require"
 
-	pb "go.etcd.io/raft/v3/raftpb"
+	pb "github.com/raftseg/raft/raftpb"
 )
 
 var (

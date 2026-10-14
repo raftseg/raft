@@ -11,14 +11,17 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the raftseg authors: import paths rewritten for this
+// fork's module.
 
 //go:build !with_tla
 
 package raft
 
 import (
-	"go.etcd.io/raft/v3/raftpb"
-	"go.etcd.io/raft/v3/tracker"
+	"github.com/raftseg/raft/raftpb"
+	"github.com/raftseg/raft/tracker"
 )
 
 const StateTraceDeployed = false

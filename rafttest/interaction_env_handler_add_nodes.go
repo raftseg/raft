@@ -11,6 +11,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the raftseg authors: import paths rewritten for this
+// fork's module.
 
 package rafttest
 
@@ -20,10 +23,10 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/cockroachdb/datadriven"
+	"github.com/raftseg/raft/internal/datadriven"
 
-	"go.etcd.io/raft/v3"
-	pb "go.etcd.io/raft/v3/raftpb"
+	"github.com/raftseg/raft"
+	pb "github.com/raftseg/raft/raftpb"
 )
 
 func (env *InteractionEnv) handleAddNodes(t *testing.T, d datadriven.TestData) error {

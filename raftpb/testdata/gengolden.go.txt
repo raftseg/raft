@@ -1,0 +1,278 @@
+// Generates a golden corpus of raftpb messages encoded by the original
+// go.etcd.io/raft/v3 raftpb (gogo/protobuf), for the fork's compatibility
+// tests.
+package main
+
+import (
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"math"
+	"math/rand"
+	"os"
+	"reflect"
+	"strings"
+
+	pb "go.etcd.io/raft/v3/raftpb"
+)
+
+type golden struct {
+	Type string `json:"type"`
+	Hex  string `json:"hex"`
+	Text string `json:"text"` // String() of the message decoded from Hex
+	JSON string `json:"json"` // encoding/json of the message decoded from Hex
+	Size int    `json:"size"`
+	// Encoding of the message decoded from JSON. JSON drops empty bytes
+	// fields (omitempty), so this can differ from Hex.
+	JSONHex string `json:"jsonhex"`
+}
+
+// Go literal of an in-memory message and its String(), for checking String
+// on values that encoding would normalise (nil versus empty slices).
+var lits []string
+
+func goLit(v reflect.Value) string {
+	switch v.Kind() {
+	case reflect.Pointer:
+		if v.IsNil() {
+			return "nil"
+		}
+		return "&" + goLit(v.Elem())
+	case reflect.Struct:
+		var parts []string
+		t := v.Type()
+		for i := 0; i < t.NumField(); i++ {
+			parts = append(parts, t.Field(i).Name+": "+goLit(v.Field(i)))
+		}
+		return t.Name() + "{" + strings.Join(parts, ", ") + "}"
+	case reflect.Slice:
+		if v.IsNil() {
+			return "nil"
+		}
+		if v.Type().Elem().Kind() == reflect.Uint8 {
+			return fmt.Sprintf("[]byte(%q)", v.Bytes())
+		}
+		var parts []string
+		for i := 0; i < v.Len(); i++ {
+			parts = append(parts, goLit(v.Index(i)))
+		}
+		return "[]" + v.Type().Elem().Name() + "{" + strings.Join(parts, ", ") + "}"
+	case reflect.Bool:
+		return fmt.Sprint(v.Bool())
+	case reflect.Uint64, reflect.Uint32:
+		return fmt.Sprintf("%d", v.Uint())
+	case reflect.Int32:
+		return fmt.Sprintf("%s(%d)", v.Type().Name(), v.Int())
+	}
+	panic(v.Kind().String())
+}
+
+var rng = rand.New(rand.NewSource(20261013))
+
+func u64() uint64 {
+	switch rng.Intn(8) {
+	case 0:
+		return 0
+	case 1:
+		return math.MaxUint64
+	case 2:
+		return uint64(rng.Intn(10))
+	case 3:
+		return 1 << uint(rng.Intn(64))
+	case 4:
+		return uint64(rng.Intn(1000))
+	default:
+		return rng.Uint64() >> uint(rng.Intn(64))
+	}
+}
+
+func bytesv() []byte {
+	switch rng.Intn(6) {
+	case 0:
+		return nil
+	case 1:
+		return []byte{}
+	case 2:
+		b := make([]byte, rng.Intn(40))
+		rng.Read(b) // arbitrary bytes, including non-printable ones
+		return b
+	case 3:
+		return []byte(fmt.Sprintf("text %d \"quoted\" \\ back\n\ttab", rng.Intn(100)))
+	case 4:
+		b := make([]byte, rng.Intn(300))
+		for i := range b {
+			b[i] = byte(32 + rng.Intn(95))
+		}
+		return b
+	default:
+		return []byte{0, 0x7f, 0x80, 0xff, '\'', '"', '?'}
+	}
+}
+
+func ids() []uint64 {
+	if rng.Intn(3) == 0 {
+		return nil
+	}
+	n := rng.Intn(6)
+	out := make([]uint64, n)
+	for i := range out {
+		out[i] = u64()
+	}
+	return out
+}
+
+func entry() pb.Entry {
+	return pb.Entry{Term: u64(), Index: u64(), Type: pb.EntryType(rng.Intn(4)), Data: bytesv()}
+}
+
+func confState() pb.ConfState {
+	return pb.ConfState{Voters: ids(), Learners: ids(), VotersOutgoing: ids(), LearnersNext: ids(), AutoLeave: rng.Intn(2) == 0}
+}
+
+func snapMeta() pb.SnapshotMetadata {
+	return pb.SnapshotMetadata{ConfState: confState(), Index: u64(), Term: u64()}
+}
+
+func snapshot() pb.Snapshot {
+	return pb.Snapshot{Data: bytesv(), Metadata: snapMeta()}
+}
+
+func message(depth int) pb.Message {
+	m := pb.Message{
+		Type: pb.MessageType(rng.Intn(24)), To: u64(), From: u64(), Term: u64(), LogTerm: u64(), Index: u64(),
+		Commit: u64(), Vote: u64(), Reject: rng.Intn(2) == 0, RejectHint: u64(), Context: bytesv(),
+	}
+	if n := rng.Intn(4); n > 0 {
+		for i := 0; i < n; i++ {
+			m.Entries = append(m.Entries, entry())
+		}
+	} else if rng.Intn(2) == 0 {
+		m.Entries = []pb.Entry{}
+	}
+	if rng.Intn(3) == 0 {
+		s := snapshot()
+		m.Snapshot = &s
+	}
+	if depth < 2 && rng.Intn(4) == 0 {
+		for i := rng.Intn(3); i >= 0; i-- {
+			m.Responses = append(m.Responses, message(depth+1))
+		}
+	}
+	return m
+}
+
+func ccSingle() pb.ConfChangeSingle {
+	return pb.ConfChangeSingle{Type: pb.ConfChangeType(rng.Intn(5)), NodeID: u64()}
+}
+
+type marshaler interface {
+	Marshal() ([]byte, error)
+	Size() int
+	String() string
+}
+
+type unmarshaler interface {
+	marshaler
+	Unmarshal([]byte) error
+}
+
+func fresh(typ string) unmarshaler {
+	switch typ {
+	case "Entry":
+		return &pb.Entry{}
+	case "Message":
+		return &pb.Message{}
+	case "HardState":
+		return &pb.HardState{}
+	case "ConfState":
+		return &pb.ConfState{}
+	case "Snapshot":
+		return &pb.Snapshot{}
+	case "SnapshotMetadata":
+		return &pb.SnapshotMetadata{}
+	case "ConfChange":
+		return &pb.ConfChange{}
+	case "ConfChangeSingle":
+		return &pb.ConfChangeSingle{}
+	case "ConfChangeV2":
+		return &pb.ConfChangeV2{}
+	}
+	panic(typ)
+}
+
+func emit(enc *json.Encoder, typ string, m marshaler, v any) {
+	b, err := m.Marshal()
+	if err != nil {
+		panic(err)
+	}
+	d := fresh(typ)
+	if err := d.Unmarshal(b); err != nil {
+		panic(err)
+	}
+	j, err := json.Marshal(d)
+	if err != nil {
+		panic(err)
+	}
+	jd := fresh(typ)
+	if err := json.Unmarshal(j, jd); err != nil {
+		panic(err)
+	}
+	jb, err := jd.Marshal()
+	if err != nil {
+		panic(err)
+	}
+	if err := enc.Encode(golden{Type: typ, Hex: hex.EncodeToString(b), Text: d.String(), JSON: string(j), Size: m.Size(), JSONHex: hex.EncodeToString(jb)}); err != nil {
+		panic(err)
+	}
+	if len(lits) < 600 {
+		lits = append(lits, fmt.Sprintf("\t{%s, %q},\n", goLit(reflect.ValueOf(v)), m.String()))
+	}
+}
+
+func main() {
+	enc := json.NewEncoder(os.Stdout)
+	n := 400
+	// Zero values first.
+	emit(enc, "Entry", &pb.Entry{}, &pb.Entry{})
+	emit(enc, "Message", &pb.Message{}, &pb.Message{})
+	emit(enc, "HardState", &pb.HardState{}, &pb.HardState{})
+	emit(enc, "ConfState", &pb.ConfState{}, &pb.ConfState{})
+	emit(enc, "Snapshot", &pb.Snapshot{}, &pb.Snapshot{})
+	emit(enc, "SnapshotMetadata", &pb.SnapshotMetadata{}, &pb.SnapshotMetadata{})
+	emit(enc, "ConfChange", &pb.ConfChange{}, &pb.ConfChange{})
+	emit(enc, "ConfChangeSingle", &pb.ConfChangeSingle{}, &pb.ConfChangeSingle{})
+	emit(enc, "ConfChangeV2", &pb.ConfChangeV2{}, &pb.ConfChangeV2{})
+	for i := 0; i < n; i++ {
+		e := entry()
+		emit(enc, "Entry", &e, &e)
+		m := message(0)
+		emit(enc, "Message", &m, &m)
+		hs := pb.HardState{Term: u64(), Vote: u64(), Commit: u64()}
+		emit(enc, "HardState", &hs, &hs)
+		cs := confState()
+		emit(enc, "ConfState", &cs, &cs)
+		s := snapshot()
+		emit(enc, "Snapshot", &s, &s)
+		sm := snapMeta()
+		emit(enc, "SnapshotMetadata", &sm, &sm)
+		cc := pb.ConfChange{Type: pb.ConfChangeType(rng.Intn(5)), NodeID: u64(), Context: bytesv(), ID: u64()}
+		emit(enc, "ConfChange", &cc, &cc)
+		ccs := ccSingle()
+		emit(enc, "ConfChangeSingle", &ccs, &ccs)
+		v2 := pb.ConfChangeV2{Transition: pb.ConfChangeTransition(rng.Intn(4)), Context: bytesv()}
+		for k := rng.Intn(4); k > 0; k-- {
+			v2.Changes = append(v2.Changes, ccSingle())
+		}
+		emit(enc, "ConfChangeV2", &v2, &v2)
+	}
+	f, err := os.Create("golden_text_test.go.gen")
+	if err != nil {
+		panic(err)
+	}
+	fmt.Fprint(f, "// Code generated by testdata/gengolden.go.txt from go.etcd.io/raft/v3 v3.6.0 raftpb. DO NOT EDIT.\n\npackage raftpb\n\n// String() of in-memory messages, as rendered by the original.\nvar goldenText = []struct {\n\tm    interface{ String() string }\n\ttext string\n}{\n")
+	for _, l := range lits {
+		fmt.Fprint(f, l)
+	}
+	fmt.Fprint(f, "}\n")
+	f.Close()
+}

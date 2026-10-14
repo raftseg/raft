@@ -11,6 +11,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the raftseg authors: import paths rewritten for this
+// fork's module.
 
 package confchange
 
@@ -19,9 +22,9 @@ import (
 	"fmt"
 	"strings"
 
-	"go.etcd.io/raft/v3/quorum"
-	pb "go.etcd.io/raft/v3/raftpb"
-	"go.etcd.io/raft/v3/tracker"
+	"github.com/raftseg/raft/quorum"
+	pb "github.com/raftseg/raft/raftpb"
+	"github.com/raftseg/raft/tracker"
 )
 
 // Changer facilitates configuration changes. It exposes methods to handle

@@ -11,6 +11,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the raftseg authors: import paths rewritten for this
+// fork's module.
 
 package rafttest
 
@@ -19,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"go.etcd.io/raft/v3"
+	"github.com/raftseg/raft"
 )
 
 func BenchmarkProposal3Nodes(b *testing.B) {

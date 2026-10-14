@@ -11,14 +11,17 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the raftseg authors: import paths rewritten for this
+// fork's module.
 
 package raft
 
 import (
 	"fmt"
 
-	pb "go.etcd.io/raft/v3/raftpb"
-	"go.etcd.io/raft/v3/tracker"
+	pb "github.com/raftseg/raft/raftpb"
+	"github.com/raftseg/raft/tracker"
 )
 
 // Status contains information about this Raft peer and its view of the system.

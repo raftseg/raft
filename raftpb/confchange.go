@@ -1,3 +1,6 @@
+// Modified by the raftseg authors: LeaveJoint no longer uses proto.Equal
+// (gogo/protobuf dependency removed); behaviour is unchanged.
+//
 // Copyright 2019 The etcd Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,8 +21,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	"github.com/gogo/protobuf/proto"
 )
 
 // ConfChangeI abstracts over ConfChangeV2 and (legacy) ConfChange to allow
@@ -107,9 +108,10 @@ func (c ConfChangeV2) EnterJoint() (autoLeave bool, ok bool) {
 // This is the case if the ConfChangeV2 is zero, with the possible exception of
 // the Context field.
 func (c ConfChangeV2) LeaveJoint() bool {
-	// NB: c is already a copy.
-	c.Context = nil
-	return proto.Equal(&c, &ConfChangeV2{})
+	// NB: c is already a copy. (Upstream compared c, with Context cleared,
+	// to the empty message with proto.Equal; for this message that is true
+	// exactly when there is no transition and no change.)
+	return c.Transition == ConfChangeTransitionAuto && len(c.Changes) == 0
 }
 
 // ConfChangesFromString parses a Space-delimited sequence of operations into a

@@ -1,0 +1,45 @@
+raft
+Copyright 2026 The raftseg authors.
+
+This module is a fork of etcd raft and contains code from the third-party
+projects below. Each is licensed under the Apache License, Version 2.0,
+whose text is kept next to the code (LICENSE, internal/datadriven/LICENSE).
+Neither project ships a NOTICE file of its own. Every file modified by the
+raftseg authors says so in its header.
+
+./  (the whole module except internal/)
+    Origin:     etcd raft, go.etcd.io/raft/v3 v3.6.0
+                https://github.com/etcd-io/raft, tag v3.6.0,
+                commit f35a02212416d045c574e30aa59d4b07c4b8d732
+    Copyright:  The etcd Authors
+    License:    LICENSE
+    Changes:
+      - Import paths rewritten from go.etcd.io/raft/v3 to this module.
+      - raftpb no longer depends on github.com/gogo/protobuf or
+        github.com/golang/protobuf. The generated Marshal, Unmarshal and
+        Size code is unchanged, so the wire format is byte-for-byte the
+        same. Descriptor registration and the XXX_ methods were removed.
+        String() and JSON enum decoding were reimplemented in
+        raftpb/compat.go. ConfChangeV2.LeaveJoint no longer calls
+        proto.Equal. raftpb/testdata/golden.jsonl, produced by the
+        original package, checks all of this. Message decoding bounds the
+        nesting of Responses, and raftpb builds on 64-bit platforms only.
+      - Tests use internal/testutil in place of github.com/stretchr/testify,
+        and internal/datadriven in place of github.com/cockroachdb/datadriven.
+      - Repository plumbing was removed or replaced: CI configuration,
+        Makefile, scripts, tools, OWNERS, .golangci.yaml, .go-version and
+        go.sum. README.md was renamed to UPSTREAM-README.md.
+
+internal/datadriven/  (used by tests only)
+    Origin:     github.com/cockroachdb/datadriven
+                v1.0.3-0.20250407164829-2945557346d5
+    Copyright:  The Cockroach Authors
+    License:    internal/datadriven/LICENSE
+    Changes:    The github.com/pmezard/go-difflib dependency was replaced
+                by diff.go, which uses only the standard library.
+
+internal/testutil/  (used by tests only)
+    Written by the raftseg authors. Its API and failure behaviour follow
+    github.com/stretchr/testify (MIT), so that the upstream tests run
+    unchanged. No testify code is included. testdata/testifycompat
+    compares the two directly.

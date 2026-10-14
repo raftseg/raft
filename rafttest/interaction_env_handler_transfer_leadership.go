@@ -11,13 +11,16 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the raftseg authors: import paths rewritten for this
+// fork's module.
 
 package rafttest
 
 import (
 	"testing"
 
-	"github.com/cockroachdb/datadriven"
+	"github.com/raftseg/raft/internal/datadriven"
 )
 
 func (env *InteractionEnv) handleTransferLeadership(t *testing.T, d datadriven.TestData) error {

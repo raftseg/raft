@@ -11,17 +11,20 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the raftseg authors: import paths rewritten for this
+// fork's module and testify replaced by internal/testutil.
 
 package rafttest
 
 import (
 	"testing"
 
-	"github.com/cockroachdb/datadriven"
-	"github.com/stretchr/testify/require"
+	"github.com/raftseg/raft/internal/datadriven"
+	"github.com/raftseg/raft/internal/testutil/require"
 
-	"go.etcd.io/raft/v3"
-	"go.etcd.io/raft/v3/raftpb"
+	"github.com/raftseg/raft"
+	"github.com/raftseg/raft/raftpb"
 )
 
 func (env *InteractionEnv) handleSendSnapshot(t *testing.T, d datadriven.TestData) error {

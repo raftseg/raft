@@ -11,6 +11,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the raftseg authors: import paths rewritten for this
+// fork's module and testify replaced by internal/testutil.
 
 package quorum
 
@@ -19,8 +22,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/cockroachdb/datadriven"
-	"github.com/stretchr/testify/require"
+	"github.com/raftseg/raft/internal/datadriven"
+	"github.com/raftseg/raft/internal/testutil/require"
 )
 
 // TestDataDriven parses and executes the test cases in ./testdata/*. An entry

@@ -11,13 +11,16 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
+// Modified by the raftseg authors: import paths rewritten for this
+// fork's module.
 
 package raft
 
 import (
 	"errors"
 
-	pb "go.etcd.io/raft/v3/raftpb"
+	pb "github.com/raftseg/raft/raftpb"
 )
 
 // Bootstrap initializes the RawNode for first use by appending configuration
