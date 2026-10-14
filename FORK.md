@@ -178,6 +178,15 @@ sends none. A leader whose configuration needed such a node waited for it
 indefinitely. A node now answers appends from a lower term with its own term,
 as the Raft paper prescribes. Test: `TestAnswersStaleLeader`.
 
+**A node without a term no longer panics on a pre-vote.** Raft's storage
+contract persists entries before the hard state, so a crash between the two
+can leave a node with entries of a term but no term of its own (0). Such a
+node rejects a pre-vote from a candidate with a shorter log, and upstream
+answered with its term, 0, on which `send` panicked. The node now rejects
+without answering; the candidate would have ignored a term-0 answer as
+stale. The simulator found this once retried reads changed its schedules.
+Test: `TestPreVoteRejectedWithoutTerm`.
+
 **`MaxSizePerMsg` 0 no longer breaks application.** With
 `MaxCommittedSizePerReady` left at its default (`MaxSizePerMsg`), a limit
 of 0 caused one of two failures:

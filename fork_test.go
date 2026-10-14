@@ -878,3 +878,37 @@ func nextEntsApplied(r *raft, s *MemoryStorage) []pb.Entry {
 	}
 	return ents
 }
+
+// Raft's storage contract persists entries before the hard state, so a
+// crash between the two can leave a node with entries of a term but no
+// term of its own (0). Such a node rejects a pre-vote from a candidate with
+// a shorter log. Upstream answered with its term, 0, and send panicked on
+// it; the candidate would have ignored the answer as stale anyway. Found by
+// internal/raftsim (seed 14664, once retried reads changed its schedules).
+func TestPreVoteRejectedWithoutTerm(t *testing.T) {
+	s := newTestMemoryStorage(withPeers(1, 2, 3))
+	if err := s.Append([]pb.Entry{{Term: 1, Index: 1}, {Term: 1, Index: 2}, {Term: 1, Index: 3}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := newTestConfig(1, 10, 1, s)
+	cfg.PreVote = true
+	r := newRaft(cfg)
+	if r.Term != 0 {
+		t.Fatalf("term %d", r.Term)
+	}
+	// A candidate with a shorter log is rejected, without an answer.
+	if err := r.Step(pb.Message{From: 2, To: 1, Term: 2, Type: pb.MsgPreVote, LogTerm: 1, Index: 2}); err != nil {
+		t.Fatal(err)
+	}
+	if msgs := r.readMessages(); len(msgs) != 0 {
+		t.Fatalf("answered %v", msgs)
+	}
+	// One whose log is at least as up to date gets the pre-vote.
+	if err := r.Step(pb.Message{From: 3, To: 1, Term: 2, Type: pb.MsgPreVote, LogTerm: 1, Index: 3}); err != nil {
+		t.Fatal(err)
+	}
+	msgs := r.readMessages()
+	if len(msgs) != 1 || msgs[0].Type != pb.MsgPreVoteResp || msgs[0].Reject || msgs[0].Term != 2 {
+		t.Fatalf("got %v", msgs)
+	}
+}

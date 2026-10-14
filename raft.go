@@ -32,7 +32,9 @@
 //   - a node that is not a voter but holds uncommitted entries campaigns
 //     when it hears no leader, to hand them over (mayRescue);
 //   - a MsgTimeoutNow that arrives before pending configuration changes
-//     are applied is acted on once they are.
+//     are applied is acted on once they are;
+//   - a node without a term rejects a pre-vote without answering, instead
+//     of panicking.
 
 package raft
 
@@ -1448,7 +1450,15 @@ func (r *raft) Step(m pb.Message) error {
 		} else {
 			r.logger.Infof("%x [logterm: %d, index: %d, vote: %x] rejected %s from %x [logterm: %d, index: %d] at term %d",
 				r.id, lastID.term, lastID.index, r.Vote, m.Type, m.From, candLastID.term, candLastID.index, r.Term)
-			r.send(pb.Message{To: m.From, Term: r.Term, Type: voteRespMsgType(m.Type), Reject: true})
+			// Fork: a node without a term rejects without answering. It can
+			// hold entries (the storage contract persists entries before the
+			// hard state, and a crash between the two keeps them without
+			// their term), and so reject a pre-vote. Upstream answered with
+			// term 0, on which send panicked; the candidate would have
+			// ignored the answer as stale.
+			if r.Term != 0 {
+				r.send(pb.Message{To: m.From, Term: r.Term, Type: voteRespMsgType(m.Type), Reject: true})
+			}
 		}
 
 	default:
