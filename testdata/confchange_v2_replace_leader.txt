@@ -136,7 +136,7 @@ stabilize
   INFO 4 [commit: 4, lastindex: 4, lastterm: 1] restored snapshot [index: 4, term: 1]
   INFO 4 [commit: 4] restored snapshot [index: 4, term: 1]
 > 4 handling Ready
-  Ready MustSync=false:
+  Ready MustSync=true:
   HardState Term:1 Commit:4
   Snapshot Index:4 Term:1 ConfState:Voters:[2 3 4] VotersOutgoing:[1 2 3] Learners:[] LearnersNext:[] AutoLeave:false
   Messages:

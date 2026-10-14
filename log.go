@@ -13,7 +13,8 @@
 // limitations under the License.
 //
 // Modified by the raftseg authors: import paths rewritten for this
-// fork's module.
+// fork's module; entry application no longer panics or stalls when the applying
+// size limit is 0 (see pauseApplying).
 
 package raft
 
@@ -232,11 +233,12 @@ func (l *raftLog) nextCommittedEnts(allowUnstable bool) (ents []pb.Entry) {
 		// Nothing to apply.
 		return nil
 	}
-	maxSize := l.maxApplyingEntsSize - l.applyingEntsSize
-	if maxSize <= 0 {
-		l.logger.Panicf("applying entry size (%d-%d)=%d not positive",
-			l.maxApplyingEntsSize, l.applyingEntsSize, maxSize)
+	if l.pauseApplying() {
+		l.logger.Panicf("applying entry size %d exceeds limit %d",
+			l.applyingEntsSize, l.maxApplyingEntsSize)
 	}
+	// With a limit of 0, maxSize is 0 and slice returns one entry.
+	maxSize := l.maxApplyingEntsSize - l.applyingEntsSize
 	ents, err := l.slice(lo, hi, maxSize)
 	if err != nil {
 		l.logger.Panicf("unexpected error when getting unapplied entries (%v)", err)
@@ -342,7 +344,16 @@ func (l *raftLog) appliedTo(i uint64, size entryEncodingSize) {
 		// Defense against underflow.
 		l.applyingEntsSize = 0
 	}
-	l.applyingEntsPaused = l.applyingEntsSize >= l.maxApplyingEntsSize
+	l.applyingEntsPaused = l.pauseApplying()
+}
+
+// pauseApplying reports whether the entries being applied use up the
+// applying size limit. Entries in flight are required: upstream compared
+// sizes alone, so a limit of 0 (the default with MaxSizePerMsg 0) paused
+// application for good, or panicked on the first Ready. Now a limit of 0
+// applies one entry at a time, as MaxSizePerMsg 0 sends one per message.
+func (l *raftLog) pauseApplying() bool {
+	return l.applyingEntsSize > 0 && l.applyingEntsSize >= l.maxApplyingEntsSize
 }
 
 func (l *raftLog) acceptApplying(i uint64, size entryEncodingSize, allowUnstable bool) {
@@ -361,7 +372,7 @@ func (l *raftLog) acceptApplying(i uint64, size entryEncodingSize, allowUnstable
 	//    allowed to return had there been no size limit. If these indexes are
 	//    not equal, then the returned entries slice must have been truncated to
 	//    adhere to the memory limit.
-	l.applyingEntsPaused = l.applyingEntsSize >= l.maxApplyingEntsSize ||
+	l.applyingEntsPaused = l.pauseApplying() ||
 		i < l.maxAppliableIndex(allowUnstable)
 }
 

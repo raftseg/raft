@@ -12,8 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 //
-// Modified by the raftseg authors: import paths rewritten for this
-// fork's module.
+// Modified by the raftseg authors. Import paths were rewritten for this
+// fork's module. Behavioural changes, each marked "Fork" where it is made:
+//   - Config.ElectionRand, so that simulations can be deterministic;
+//   - a leader that is not a voter hands leadership to a voter (handOff),
+//     is exempt from CheckQuorum and confirms reads with a quorum;
+//   - a single voter answers reads locally only if it is that voter, and
+//     only once it has committed an entry in its term;
+//   - lease-based reads need a quorum's acknowledgement of a recent
+//     heartbeat round (leaseValid), end once MsgTimeoutNow is sent, and a
+//     restarted node keeps the promise behind them (startGuard);
+//   - a follower refuses snapshots while committed entries are being
+//     applied, and forwards a transfer request that already has a term
+//     without panicking;
+//   - a node answers appends from a lower term even without CheckQuorum or
+//     PreVote, so that a stale leader learns the higher term;
+//   - a configuration change followed by another in the log is known to be
+//     committed (inferConfChangeCommit);
+//   - a node that is not a voter but holds uncommitted entries campaigns
+//     when it hears no leader, to hand them over (mayRescue);
+//   - a MsgTimeoutNow that arrives before pending configuration changes
+//     are applied is acted on once they are.
 
 package raft
 
@@ -242,6 +261,8 @@ type Config struct {
 	// should (clock can move backward/pause without any bound). ReadIndex is not safe
 	// in that case.
 	// CheckQuorum MUST be enabled if ReadOnlyOption is ReadOnlyLeaseBased.
+	// Fork: a leader that has started a leadership transfer, or is not a
+	// voter, confirms reads with a quorum as with ReadOnlySafe.
 	ReadOnlyOption ReadOnlyOption
 
 	// Logger is the logger used for raft log. For multinode which can host
@@ -285,10 +306,27 @@ type Config struct {
 	//
 	// This behavior will become unconditional in the future. See:
 	// https://github.com/etcd-io/raft/issues/83
+	//
+	// Fork: a leader that is no longer a voter always hands leadership to
+	// a voter of the new configuration: it keeps replicating, drops new
+	// proposals, and sends MsgTimeoutNow to the voter with the most of its
+	// log once that voter holds all of it, retrying every election timeout.
+	// With StepDownOnRemoval, it steps down as soon as it has sent
+	// MsgTimeoutNow; without, it leads until the new leader takes over.
+	// Upstream stepped down at once, which could leave it the only node
+	// with entries every voter needed, unable to campaign and refusing its
+	// vote to them: the group then stayed without a leader for good.
 	StepDownOnRemoval bool
 
 	// raft state tracer
 	TraceLogger TraceLogger
+
+	// ElectionRand, if set, randomizes election timeouts in place of the
+	// cryptographic random source used by default. Intn(n) should return
+	// a value in [0, n); other values are reduced into that range. It is
+	// called from the goroutine driving this raft instance only.
+	// Deterministic simulations set it; production code leaves it nil.
+	ElectionRand interface{ Intn(n int) int }
 }
 
 func (c *Config) validate() error {
@@ -435,7 +473,42 @@ type raft struct {
 	pendingReadIndexMessages []pb.Message
 
 	traceLogger TraceLogger
+
+	// electionRand is Config.ElectionRand, or nil for globalRand.
+	electionRand interface{ Intn(n int) int }
+
+	// pendingTimeoutNow records a MsgTimeoutNow received in this term while
+	// configuration changes awaited application (fork).
+	pendingTimeoutNow bool
+
+	// leaseRevoked is set once this leader has sent MsgTimeoutNow in its
+	// term. The recipient's election bypasses the lease that followers
+	// otherwise honour, so lease-based reads are no longer safe; reads
+	// are confirmed by a quorum instead for the rest of the term.
+	leaseRevoked bool
+
+	// Lease-based reads (fork; see leaseValid). leaseTicks counts this
+	// leader's ticks in its term. Each heartbeat round is numbered and its
+	// sending tick kept in leaseSent; followers echo the number, and
+	// leaseAcked holds, per peer, 1 + the sending tick of the latest round
+	// it acknowledged.
+	leaseTicks uint64
+	leaseRound uint64
+	leaseSent  []leaseSend
+	leaseAcked map[uint64]uint64
+	// startGuard counts down the ticks after start during which a node in
+	// lease mode ignores vote requests, as if it had just heard from a
+	// leader: it may have promised a leader, before restarting, not to
+	// vote for anyone else for an election timeout.
+	startGuard int
 }
+
+type leaseSend struct{ round, tick uint64 }
+
+// leaseMargin is how many ticks before a follower's promise runs out the
+// leader stops relying on it: one for the phase between the two clocks,
+// one for drift.
+const leaseMargin = 2
 
 func newRaft(c *Config) *raft {
 	if err := c.validate(); err != nil {
@@ -465,6 +538,13 @@ func newRaft(c *Config) *raft {
 		disableConfChangeValidation: c.DisableConfChangeValidation,
 		stepDownOnRemoval:           c.StepDownOnRemoval,
 		traceLogger:                 c.TraceLogger,
+		electionRand:                c.ElectionRand,
+	}
+
+	if c.ReadOnlyOption == ReadOnlyLeaseBased && c.CheckQuorum && hs.Term > 0 {
+		// A node that has never persisted a term has never acknowledged
+		// a leader, so it has promised nothing.
+		r.startGuard = r.electionTimeout
 	}
 
 	traceInitState(r)
@@ -482,6 +562,7 @@ func newRaft(c *Config) *raft {
 	if !IsEmptyHardState(hs) {
 		r.loadState(hs)
 	}
+	r.inferConfChangeCommit()
 	if c.Applied > 0 {
 		raftlog.appliedTo(c.Applied, 0 /* size */)
 	}
@@ -706,6 +787,7 @@ func (r *raft) sendHeartbeat(to uint64, ctx []byte) {
 		Type:    pb.MsgHeartbeat,
 		Commit:  commit,
 		Context: ctx,
+		Index:   r.leaseRound, // fork: heartbeat round, echoed (see leaseValid)
 	})
 	pr.SentCommit(commit)
 }
@@ -732,6 +814,15 @@ func (r *raft) bcastHeartbeat() {
 }
 
 func (r *raft) bcastHeartbeatWithCtx(ctx []byte) {
+	if r.readOnly.option == ReadOnlyLeaseBased {
+		// Fork: number the round, and forget rounds too old to back a
+		// lease.
+		r.leaseRound++
+		r.leaseSent = append(r.leaseSent, leaseSend{round: r.leaseRound, tick: r.leaseTicks})
+		for len(r.leaseSent) > 1 && r.leaseSent[0].tick+uint64(r.electionTimeout) <= r.leaseTicks {
+			r.leaseSent = r.leaseSent[1:]
+		}
+	}
 	r.trk.Visit(func(id uint64, _ *tracker.Progress) {
 		if id == r.id {
 			return
@@ -744,6 +835,11 @@ func (r *raft) appliedTo(index uint64, size entryEncodingSize) {
 	oldApplied := r.raftLog.applied
 	newApplied := max(index, oldApplied)
 	r.raftLog.appliedTo(newApplied, size)
+
+	if r.pendingTimeoutNow && r.state == StateFollower && !r.hasUnappliedConfChanges() {
+		r.pendingTimeoutNow = false
+		r.hup(campaignTransfer)
+	}
 
 	if r.trk.Config.AutoLeave && newApplied >= r.pendingConfIndex && r.state == StateLeader {
 		// If the current (and most recent, at least for this leader's term)
@@ -788,8 +884,11 @@ func (r *raft) reset(term uint64) {
 	if r.Term != term {
 		r.Term = term
 		r.Vote = None
+		r.pendingTimeoutNow = false
 	}
 	r.lead = None
+	r.leaseRevoked = false
+	r.leaseTicks, r.leaseRound, r.leaseSent, r.leaseAcked = 0, 0, nil, nil
 
 	r.electionElapsed = 0
 	r.heartbeatElapsed = 0
@@ -852,19 +951,53 @@ func (r *raft) appendEntry(es ...pb.Entry) (accepted bool) {
 // tickElection is run by followers and candidates after r.electionTimeout.
 func (r *raft) tickElection() {
 	r.electionElapsed++
+	if r.startGuard > 0 {
+		r.startGuard--
+	}
 
 	if r.promotable() && r.pastElectionTimeout() {
 		r.electionElapsed = 0
 		if err := r.Step(pb.Message{From: r.id, Type: pb.MsgHup}); err != nil {
 			r.logger.Debugf("error occurred during election: %v", err)
 		}
+	} else if r.pastElectionTimeout() && r.mayRescue() {
+		r.electionElapsed = 0
+		r.logger.Infof("%x is not a voter, holds entries beyond its commit index %d and hears no leader; campaigns to hand them over",
+			r.id, r.raftLog.committed)
+		r.campaign(campaignPreElection)
 	}
+}
+
+// mayRescue reports whether this node, which is not a voter (a learner, or
+// removed), may campaign. Fork addition.
+//
+// A leader that removes or demotes itself hands leadership over (see
+// handOff), but a newer term can depose it first. It may then hold entries
+// no voter has, while voters that have not applied its removal still count
+// it, need its vote and cannot get it, their logs being shorter. Upstream,
+// the group then had no leader for good. Such a node campaigns, through a
+// pre-vote that wins only if no voter hears a leader and its log is at
+// least as up to date as theirs. Elected, it is a leader that is not a
+// voter: it replicates its log, and hands leadership to a voter. Votes are
+// counted in its configuration as for any candidate, so this changes no
+// safety argument.
+func (r *raft) mayRescue() bool {
+	pr := r.trk.Progress[r.id]
+	return (pr == nil || pr.IsLearner) &&
+		len(r.trk.Voters[0]) > 0 &&
+		r.raftLog.lastIndex() > r.raftLog.committed &&
+		!r.raftLog.hasNextOrInProgressSnapshot() &&
+		!r.hasUnappliedConfChanges()
 }
 
 // tickHeartbeat is run by leaders to send a MsgBeat after r.heartbeatTimeout.
 func (r *raft) tickHeartbeat() {
 	r.heartbeatElapsed++
 	r.electionElapsed++
+	r.leaseTicks++
+	if r.startGuard > 0 {
+		r.startGuard--
+	}
 
 	if r.electionElapsed >= r.electionTimeout {
 		r.electionElapsed = 0
@@ -876,6 +1009,11 @@ func (r *raft) tickHeartbeat() {
 		// If current leader cannot transfer leadership in electionTimeout, it becomes leader again.
 		if r.state == StateLeader && r.leadTransferee != None {
 			r.abortLeaderTransfer()
+		}
+		// A leader that is not a voter tries again, perhaps with another
+		// voter.
+		if r.state == StateLeader && !r.isVoter() {
+			r.handOff()
 		}
 	}
 
@@ -947,11 +1085,14 @@ func (r *raft) becomeLeader() {
 	// (perhaps after having received a snapshot as a result). The leader is
 	// trivially in this state. Note that r.reset() has initialized this
 	// progress with the last index already.
-	pr := r.trk.Progress[r.id]
-	pr.BecomeReplicate()
-	// The leader always has RecentActive == true; MsgCheckQuorum makes sure to
-	// preserve this.
-	pr.RecentActive = true
+	// Fork: a node removed from the configuration has no progress; it
+	// can be elected to hand its log over (see mayRescue).
+	if pr := r.trk.Progress[r.id]; pr != nil {
+		pr.BecomeReplicate()
+		// The leader always has RecentActive == true; MsgCheckQuorum makes
+		// sure to preserve this.
+		pr.RecentActive = true
+	}
 
 	// Conservatively set the pendingConfIndex to the last index in the
 	// log. There may or may not be a pending config change, but it's
@@ -971,6 +1112,10 @@ func (r *raft) becomeLeader() {
 	// quota of the new leader. In other words, after the call to appendEntry,
 	// r.uncommittedSize is still 0.
 	r.logger.Infof("%x became leader at term %d", r.id, r.Term)
+	if !r.isVoter() {
+		// Fork: elected as a learner (see mayRescue).
+		r.handOff()
+	}
 }
 
 func (r *raft) hup(t CampaignType) {
@@ -990,6 +1135,51 @@ func (r *raft) hup(t CampaignType) {
 
 	r.logger.Infof("%x is starting a new election at term %d", r.id, r.Term)
 	r.campaign(t)
+}
+
+// inferConfChangeCommit advances the commit index to the second-to-last
+// configuration change in the uncommitted part of the log: the last one
+// proves it committed. Fork addition.
+//
+// A leader appends a configuration change only once it has applied every
+// earlier one in its log (pendingConfIndex), and log matching makes our log
+// equal to that leader's up to the later change. Without this, a node that
+// held two configuration changes but had not learned that the first was
+// committed kept counting votes with the configuration before both, and
+// could be elected by a majority of it, disjoint from a majority of the
+// configuration after both (with joint consensus, or two single changes):
+// two leaders could then commit different entries at the same index.
+// Learning the commit, the node must apply the first change before it may
+// campaign (hasUnappliedConfChanges), which leaves its configuration one
+// change from the latest, and adjacent configurations share a majority.
+//
+// The inference relies on raft refusing a configuration change while one
+// is pending, so it is skipped with DisableConfChangeValidation, where the
+// application serializes changes.
+func (r *raft) inferConfChangeCommit() {
+	if r.disableConfChangeValidation {
+		return
+	}
+	lo, hi := r.raftLog.committed+1, r.raftLog.lastIndex()+1
+	if lo >= hi {
+		return
+	}
+	var prev, last uint64
+	if err := r.raftLog.scan(lo, hi, r.raftLog.maxApplyingEntsSize, func(ents []pb.Entry) error {
+		for i := range ents {
+			if ents[i].Type == pb.EntryConfChange || ents[i].Type == pb.EntryConfChangeV2 {
+				prev, last = last, ents[i].Index
+			}
+		}
+		return nil
+	}); err != nil {
+		r.logger.Panicf("error scanning uncommitted entries [%d, %d): %v", lo, hi, err)
+	}
+	if prev > r.raftLog.committed {
+		r.logger.Infof("%x [commit: %d] configuration change at %d is committed, as a later one at %d was proposed after it was applied",
+			r.id, r.raftLog.committed, prev, last)
+		r.raftLog.commitTo(prev)
+	}
 }
 
 // errBreak is a sentinel error used to break a callback-based loop.
@@ -1026,7 +1216,7 @@ func (r *raft) hasUnappliedConfChanges() bool {
 // campaign transitions the raft instance to candidate state. This must only be
 // called after verifying that this is a legitimate transition.
 func (r *raft) campaign(t CampaignType) {
-	if !r.promotable() {
+	if !r.promotable() && !r.mayRescue() {
 		// This path should not be hit (callers are supposed to check), but
 		// better safe than sorry.
 		r.logger.Warningf("%x is unpromotable; campaign() should have been called", r.id)
@@ -1096,6 +1286,9 @@ func (r *raft) Step(m pb.Message) error {
 		if m.Type == pb.MsgVote || m.Type == pb.MsgPreVote {
 			force := bytes.Equal(m.Context, []byte(campaignTransfer))
 			inLease := r.checkQuorum && r.lead != None && r.electionElapsed < r.electionTimeout
+			// Fork: a node in lease mode honours, after a restart, a
+			// promise it may have made before (see startGuard).
+			inLease = inLease || r.startGuard > 0
 			if !force && inLease {
 				// If a server receives a RequestVote request within the minimum election timeout
 				// of hearing from a current leader, it does not update its term or grant its vote
@@ -1126,7 +1319,14 @@ func (r *raft) Step(m pb.Message) error {
 		}
 
 	case m.Term < r.Term:
-		if (r.checkQuorum || r.preVote) && (m.Type == pb.MsgHeartbeat || m.Type == pb.MsgApp) {
+		// Fork: answer always. Without checkQuorum or preVote, upstream
+		// relied on MsgVote to carry a higher term to a stale leader, but a
+		// node sends MsgVote only to the voters of its own configuration,
+		// which can exclude that leader, and a learner sends none. A leader
+		// whose configuration needs the node then waited for it for ever,
+		// while the node ignored it. The answer makes the leader step down
+		// and stand again at the higher term, as in the Raft paper.
+		if m.Type == pb.MsgHeartbeat || m.Type == pb.MsgApp {
 			// We have received messages from a leader at a lower term. It is possible
 			// that these messages were simply delayed in the network, but this could
 			// also mean that this node has advanced its term number during a network
@@ -1274,7 +1474,11 @@ func stepLeader(r *raft, m pb.Message) error {
 		r.bcastHeartbeat()
 		return nil
 	case pb.MsgCheckQuorum:
-		if !r.trk.QuorumActive() {
+		// A leader that is not a voter stays until it has handed over: it
+		// may hold entries that no voter has, and voters still counting it
+		// would then need its vote, which it would refuse. It confirms
+		// reads with a quorum of voters instead of relying on a lease.
+		if !r.trk.QuorumActive() && r.isVoter() {
 			r.logger.Warningf("%x stepped down to follower since quorum is not active", r.id)
 			r.becomeFollower(r.Term, None)
 		}
@@ -1301,6 +1505,16 @@ func stepLeader(r *raft, m pb.Message) error {
 			return ErrProposalDropped
 		}
 
+		for i := range m.Entries {
+			// Fork: a configuration change raft could not apply is
+			// refused here; upstream panicked on one that did not decode,
+			// and every node panicked applying one with an unknown
+			// transition or change type.
+			if err := checkConfChange(m.Entries[i]); err != nil {
+				r.logger.Warningf("%x dropping invalid configuration change: %v", r.id, err)
+				return ErrProposalDropped
+			}
+		}
 		for i := range m.Entries {
 			e := &m.Entries[i]
 			var cc pb.ConfChangeI
@@ -1347,16 +1561,12 @@ func stepLeader(r *raft, m pb.Message) error {
 		r.bcastAppend()
 		return nil
 	case pb.MsgReadIndex:
-		// only one voting member (the leader) in the cluster
-		if r.trk.IsSingleton() {
-			if resp := r.responseToReadIndexReq(m, r.raftLog.committed); resp.To != None {
-				r.send(resp)
-			}
-			return nil
-		}
-
 		// Postpone read only request when this leader has not committed
-		// any log entry at its term.
+		// any log entry at its term. Fork: this now applies to a single
+		// voter too. Upstream answered it at once with its commit index,
+		// which can lag behind entries committed, applied and acknowledged
+		// in earlier terms: after a restart (the commit index is persisted
+		// lazily), or when leadership has just been handed to it.
 		if !r.committedEntryInCurrentTerm() {
 			r.pendingReadIndexMessages = append(r.pendingReadIndexMessages, m)
 			return nil
@@ -1592,7 +1802,12 @@ func stepLeader(r *raft, m pb.Message) error {
 			r.sendAppend(m.From)
 		}
 
-		if r.readOnly.option != ReadOnlySafe || len(m.Context) == 0 {
+		if m.Index != 0 {
+			r.leaseAck(m.From, m.Index)
+		}
+		// Read acks arrive with ReadOnlySafe, and when a lease is not
+		// established (see sendMsgReadIndexResponse).
+		if len(m.Context) == 0 {
 			return nil
 		}
 
@@ -1743,6 +1958,10 @@ func stepFollower(r *raft, m pb.Message) error {
 			return nil
 		}
 		m.To = r.lead
+		// Fork: a request that arrives with a term (from a peer that
+		// forwarded it already) is forwarded at ours. Upstream, send
+		// panicked on the term already set.
+		m.Term = 0
 		r.send(m)
 	case pb.MsgForgetLeader:
 		if r.readOnly.option == ReadOnlyLeaseBased {
@@ -1758,6 +1977,15 @@ func stepFollower(r *raft, m pb.Message) error {
 		// Leadership transfers never use pre-vote even if r.preVote is true; we
 		// know we are not recovering from a partition so there is no need for the
 		// extra round trip.
+		if r.hasUnappliedConfChanges() {
+			// Fork: a transfer often arrives with the commit of the
+			// configuration change that prompted it (see handOff), before
+			// that change is applied. Upstream dropped it, and the group
+			// waited out an election timeout; campaign once applied.
+			r.pendingTimeoutNow = true
+			r.logger.Infof("%x [term %d] will campaign once its pending configuration changes are applied", r.id, r.Term)
+			return nil
+		}
 		r.hup(campaignTransfer)
 	case pb.MsgReadIndex:
 		if r.lead == None {
@@ -1796,6 +2024,12 @@ func (r *raft) handleAppendEntries(m pb.Message) {
 		return
 	}
 	if mlastIndex, ok := r.raftLog.maybeAppend(a, m.Commit); ok {
+		for i := range m.Entries {
+			if m.Entries[i].Type == pb.EntryConfChange || m.Entries[i].Type == pb.EntryConfChangeV2 {
+				r.inferConfChangeCommit()
+				break
+			}
+		}
 		r.send(pb.Message{To: m.From, Type: pb.MsgAppResp, Index: mlastIndex})
 		return
 	}
@@ -1832,7 +2066,54 @@ func (r *raft) handleAppendEntries(m pb.Message) {
 
 func (r *raft) handleHeartbeat(m pb.Message) {
 	r.raftLog.commitTo(m.Commit)
-	r.send(pb.Message{To: m.From, Type: pb.MsgHeartbeatResp, Context: m.Context})
+	// Fork: echo the heartbeat round (see leaseValid).
+	r.send(pb.Message{To: m.From, Type: pb.MsgHeartbeatResp, Context: m.Context, Index: m.Index})
+}
+
+// leaseAck records that peer id acknowledged heartbeat round.
+func (r *raft) leaseAck(id, round uint64) {
+	for i := len(r.leaseSent) - 1; i >= 0; i-- {
+		if r.leaseSent[i].round == round {
+			if r.leaseAcked == nil {
+				r.leaseAcked = map[uint64]uint64{}
+			}
+			r.leaseAcked[id] = max(r.leaseAcked[id], r.leaseSent[i].tick+1)
+			return
+		}
+	}
+}
+
+// leaseValid reports whether this leader may serve a lease-based read.
+// Fork: upstream trusted CheckQuorum, which tests a quorum's activity
+// only once per election timeout and counts responses to heartbeats sent
+// at any time, so a deposed leader kept serving reads for up to two
+// election timeouts after the last contact, well after a new leader could
+// have been elected and committed writes. Here a quorum of voters must
+// have acknowledged a heartbeat round sent recently enough that each of
+// them still refuses to vote for another candidate: a follower does so
+// for an election timeout after hearing from its leader (and after a
+// restart, see startGuard). Time is counted in ticks, so tick rates must
+// not drift apart by more than leaseMargin ticks per election timeout.
+func (r *raft) leaseValid() bool {
+	if !r.checkQuorum || r.leaseRevoked || !r.isVoter() {
+		return false
+	}
+	q := r.trk.Voters.CommittedIndex(leaseIndexer{r})
+	if q == 0 {
+		return false
+	}
+	sent := uint64(q) - 1
+	return r.leaseTicks+leaseMargin < sent+uint64(r.electionTimeout)
+}
+
+type leaseIndexer struct{ r *raft }
+
+func (l leaseIndexer) AckedIndex(id uint64) (quorum.Index, bool) {
+	if id == l.r.id {
+		return quorum.Index(l.r.leaseTicks + 1), true
+	}
+	v, ok := l.r.leaseAcked[id]
+	return quorum.Index(v), ok
 }
 
 func (r *raft) handleSnapshot(m pb.Message) {
@@ -1859,6 +2140,19 @@ func (r *raft) handleSnapshot(m pb.Message) {
 // ignored, either because it was obsolete or because of an error.
 func (r *raft) restore(s pb.Snapshot) bool {
 	if s.Metadata.Index <= r.raftLog.committed {
+		return false
+	}
+	if r.raftLog.applying > r.raftLog.applied {
+		// Fork: committed entries handed to the application are not
+		// applied yet. Restoring now would switch to the snapshot's
+		// configuration first; the application would then apply those
+		// entries, calling ApplyConfChange for configuration changes older
+		// than the snapshot on top of it and corrupting the configuration.
+		// (With AsyncStorageWrites this happens whenever the apply thread
+		// lags; with Node, whenever a snapshot arrives between Ready and
+		// Advance.) The leader retries the snapshot later.
+		r.logger.Infof("%x [applying: %d, applied: %d] ignored snapshot [index: %d] until entries being applied are applied",
+			r.id, r.raftLog.applying, r.raftLog.applied, s.Metadata.Index)
 		return false
 	}
 	if r.state != StateFollower {
@@ -1990,17 +2284,13 @@ func (r *raft) switchToConfig(cfg tracker.Config, trk tracker.ProgressMap) pb.Co
 	r.isLearner = ok && pr.IsLearner
 
 	if (!ok || r.isLearner) && r.state == StateLeader {
-		// This node is leader and was removed or demoted, step down if requested.
-		//
-		// We prevent demotions at the time writing but hypothetically we handle
-		// them the same way as removing the leader.
-		//
-		// TODO(tbg): ask follower with largest Match to TimeoutNow (to avoid
-		// interruption). This might still drop some proposals but it's better than
-		// nothing.
-		if r.stepDownOnRemoval {
-			r.becomeFollower(r.Term, None)
+		// This node is leader and was removed or demoted. Tell everyone what
+		// is now committed, so that the voters learn the new configuration,
+		// and hand leadership to one of them (see handOff).
+		if r.maybeCommit() {
+			r.bcastAppend()
 		}
+		r.handOff()
 		return cs
 	}
 
@@ -2050,11 +2340,65 @@ func (r *raft) pastElectionTimeout() bool {
 }
 
 func (r *raft) resetRandomizedElectionTimeout() {
-	r.randomizedElectionTimeout = r.electionTimeout + globalRand.Intn(r.electionTimeout)
+	var jitter int
+	if r.electionRand != nil {
+		jitter = r.electionRand.Intn(r.electionTimeout) % r.electionTimeout
+		if jitter < 0 {
+			jitter += r.electionTimeout
+		}
+	} else {
+		jitter = globalRand.Intn(r.electionTimeout)
+	}
+	r.randomizedElectionTimeout = r.electionTimeout + jitter
 }
 
 func (r *raft) sendTimeoutNow(to uint64) {
 	r.send(pb.Message{To: to, Type: pb.MsgTimeoutNow})
+	r.leaseRevoked = true
+	if r.state == StateLeader && r.stepDownOnRemoval && !r.isVoter() {
+		// Handed over: the transferee holds our whole log, so it can win
+		// an election even if this message is lost.
+		r.logger.Infof("%x is not a voter and stepped down after handing leadership to %x", r.id, to)
+		r.becomeFollower(r.Term, None)
+	}
+}
+
+// isVoter reports whether this node is a voter of its configuration (of
+// either half of a joint one).
+func (r *raft) isVoter() bool {
+	_, in := r.trk.Voters[0][r.id]
+	_, out := r.trk.Voters[1][r.id]
+	return in || out
+}
+
+// handOff starts transferring leadership from this leader, which is not a
+// voter, to the voter whose log matches the most of ours (the lowest ID
+// among equals). The transfer sends MsgTimeoutNow once that voter holds
+// our whole log; proposals are dropped meanwhile.
+func (r *raft) handOff() {
+	if r.state != StateLeader || r.leadTransferee != None {
+		return
+	}
+	best, bestMatch := None, uint64(0)
+	r.trk.Visit(func(id uint64, pr *tracker.Progress) {
+		if id == r.id || pr.IsLearner {
+			return
+		}
+		if best == None || pr.Match > bestMatch {
+			best, bestMatch = id, pr.Match
+		}
+	})
+	if best == None {
+		return
+	}
+	r.logger.Infof("%x [term %d] is not a voter; hands leadership to %x", r.id, r.Term, best)
+	r.electionElapsed = 0
+	r.leadTransferee = best
+	if bestMatch == r.raftLog.lastIndex() {
+		r.sendTimeoutNow(best)
+	} else {
+		r.sendAppend(best)
+	}
 }
 
 func (r *raft) abortLeaderTransfer() {
@@ -2143,10 +2487,28 @@ func releasePendingReadIndexMessages(r *raft) {
 }
 
 func sendMsgReadIndexResponse(r *raft, m pb.Message) {
+	// Only one voting member (the leader) in the cluster. Fork: upstream
+	// did not check that the one voter is this leader, so a leader that had
+	// removed itself, leaving a single voter, answered linearizable reads
+	// from its own, possibly stale, state.
+	if r.trk.IsSingleton() && r.isVoter() {
+		if resp := r.responseToReadIndexReq(m, r.raftLog.committed); resp.To != None {
+			r.send(resp)
+		}
+		return
+	}
 	// thinking: use an internally defined context instead of the user given context.
 	// We can express this in terms of the term and index instead of a user-supplied value.
 	// This would allow multiple reads to piggyback on the same message.
-	switch r.readOnly.option {
+	option := r.readOnly.option
+	if option == ReadOnlyLeaseBased && !r.leaseValid() {
+		// Without a lease a quorum of voters must confirm the leader, as
+		// with ReadOnlySafe. Fork: upstream also served lease reads from
+		// a leader that had sent MsgTimeoutNow (whose recipient's election
+		// ignores leases) or was not a voter, and see leaseValid.
+		option = ReadOnlySafe
+	}
+	switch option {
 	// If more than the local vote is needed, go through a full broadcast.
 	case ReadOnlySafe:
 		r.readOnly.addRequest(r.raftLog.committed, m)

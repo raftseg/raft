@@ -13,7 +13,8 @@
 // limitations under the License.
 //
 // Modified by the raftseg authors: import paths rewritten for this
-// fork's module.
+// fork's module; Ready.MustSync is set when the Ready carries a snapshot; Step
+// validates messages from peers.
 
 package raft
 
@@ -123,6 +124,15 @@ func (rn *RawNode) Step(m pb.Message) error {
 	if IsLocalMsg(m.Type) && !IsLocalMsgTarget(m.From) {
 		return ErrStepLocalMsg
 	}
+	// Fork: check messages from peers (see ValidateMessage).
+	if isPeerMessage(rn.raft.id, m) {
+		if err := ValidateMessage(m); err != nil {
+			return err
+		}
+		if m.To != rn.raft.id {
+			return invalid(m, "addressed to another node")
+		}
+	}
 	if IsResponseMsg(m.Type) && !IsLocalMsgTarget(m.From) && rn.raft.trk.Progress[m.From] == nil {
 		return ErrStepPeerNotFound
 	}
@@ -163,7 +173,12 @@ func (rn *RawNode) readyWithoutAccept() Ready {
 	if len(r.readStates) != 0 {
 		rd.ReadStates = r.readStates
 	}
-	rd.MustSync = MustSync(r.hardState(), rn.prevHardSt, len(rd.Entries))
+	// Fork: a snapshot must be durable too before the node acknowledges
+	// it. Upstream left MustSync false for a Ready holding only a snapshot
+	// (and a commit index), so an application honouring MustSync could
+	// acknowledge a snapshot, lose it in a crash and restart with an empty
+	// log, after which the leader's heartbeat panics the node.
+	rd.MustSync = MustSync(r.hardState(), rn.prevHardSt, len(rd.Entries)) || !IsEmptySnap(rd.Snapshot)
 
 	if rn.asyncStorageWrites {
 		// If async storage writes are enabled, enqueue messages to

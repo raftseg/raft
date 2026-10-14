@@ -10,6 +10,9 @@ of dependencies.
 - **Wire-compatible with etcd raft:** messages encode byte for byte as the
   original's. `raftpb/testdata` holds 3,609 messages encoded by the
   original and 21,654 damaged or hostile inputs, and the tests check both.
+- **Fixes:** safety, linearizable-read and liveness fixes, and validation
+  of messages from peers. [FORK.md](FORK.md) explains each change from
+  upstream, and each has a regression test that fails on upstream's code.
 - **64-bit platforms only:** `raftpb` refuses to build elsewhere (see
   `raftpb/platform.go`).
 

@@ -13,7 +13,8 @@
 // limitations under the License.
 //
 // Modified by the raftseg authors: import paths rewritten for this
-// fork's module.
+// fork's module; Ready.MustSync documented to cover snapshots; Step validates
+// messages from peers.
 
 package raft
 
@@ -112,7 +113,7 @@ type Ready struct {
 	// when the snapshot has been received or has failed by calling ReportSnapshot.
 	Messages []pb.Message
 
-	// MustSync indicates whether the HardState and Entries must be durably
+	// MustSync indicates whether the HardState, Entries and Snapshot must be durably
 	// written to disk or if a non-durable write is permissible.
 	MustSync bool
 }
@@ -478,6 +479,16 @@ func (n *node) Step(ctx context.Context, m pb.Message) error {
 	if IsLocalMsg(m.Type) && !IsLocalMsgTarget(m.From) {
 		// TODO: return an error?
 		return nil
+	}
+	// Fork: check messages from peers, as RawNode.Step does. The ID is
+	// set at construction and never changes, so reading it here is safe.
+	if n.rn != nil && isPeerMessage(n.rn.raft.id, m) {
+		if err := ValidateMessage(m); err != nil {
+			return err
+		}
+		if m.To != n.rn.raft.id {
+			return invalid(m, "addressed to another node")
+		}
 	}
 	return n.step(ctx, m)
 }

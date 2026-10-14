@@ -106,6 +106,11 @@ stabilize 1
   1->2 MsgApp Term:1 Log:1/6 Commit:5
   1->3 MsgApp Term:1 Log:1/6 Commit:5
   INFO 1 switched to configuration voters=(2 3)
+  INFO 1 [term 1] is not a voter; hands leadership to 2
+> 1 handling Ready
+  Ready MustSync=false:
+  Messages:
+  1->2 MsgApp Term:1 Log:1/6 Commit:5
 
 raft-state
 ----
@@ -120,6 +125,7 @@ stabilize 2
   1->2 MsgApp Term:1 Log:1/5 Commit:3 Entries:[1/6 EntryNormal "bar"]
   1->2 MsgApp Term:1 Log:1/6 Commit:4
   1->2 MsgApp Term:1 Log:1/6 Commit:5
+  1->2 MsgApp Term:1 Log:1/6 Commit:5
 > 2 handling Ready
   Ready MustSync=true:
   HardState Term:1 Vote:1 Commit:5
@@ -132,6 +138,7 @@ stabilize 2
   2->1 MsgAppResp Term:1 Log:0/6
   2->1 MsgAppResp Term:1 Log:0/6
   2->1 MsgAppResp Term:1 Log:0/6
+  2->1 MsgAppResp Term:1 Log:0/6
   INFO 2 switched to configuration voters=(2 3)
 
 # ... which thankfully is what we see on the leader.
@@ -139,18 +146,40 @@ stabilize 1
 ----
 > 1 receiving messages
   2->1 MsgAppResp Term:1 Log:0/6
+  INFO 1 sent MsgTimeoutNow to 2 after received MsgAppResp
   2->1 MsgAppResp Term:1 Log:0/6
   2->1 MsgAppResp Term:1 Log:0/6
+  2->1 MsgAppResp Term:1 Log:0/6
+> 1 handling Ready
+  Ready MustSync=false:
+  Messages:
+  1->2 MsgTimeoutNow Term:1 Log:0/0
 
-# When n3 responds, quorum is reached and everything falls into place.
+# When n3 responds, quorum is reached and everything falls into place. (Fork:
+# n1, no longer a voter, hands leadership to n2, which wins at term 2; n2 and n3
+# answer n1's appends at the old term, and n1 steps down.)
 stabilize
 ----
+> 2 receiving messages
+  1->2 MsgTimeoutNow Term:1 Log:0/0
+  INFO 2 [term 1] received MsgTimeoutNow from 1 and starts an election to get leadership.
+  INFO 2 is starting a new election at term 1
+  INFO 2 became candidate at term 2
+  INFO 2 [logterm: 1, index: 6] sent MsgVote request to 3 at term 2
 > 3 receiving messages
   1->3 MsgApp Term:1 Log:1/3 Commit:3 Entries:[1/4 EntryConfChange r1]
   1->3 MsgApp Term:1 Log:1/4 Commit:3 Entries:[1/5 EntryNormal "foo"]
   1->3 MsgApp Term:1 Log:1/5 Commit:3 Entries:[1/6 EntryNormal "bar"]
   1->3 MsgApp Term:1 Log:1/6 Commit:4
   1->3 MsgApp Term:1 Log:1/6 Commit:5
+> 2 handling Ready
+  Ready MustSync=true:
+  Lead:0 State:StateCandidate
+  HardState Term:2 Vote:2 Commit:5
+  Messages:
+  2->3 MsgVote Term:2 Log:1/6
+  INFO 2 received MsgVoteResp from 2 at term 2
+  INFO 2 has received 1 MsgVoteResp votes and 0 vote rejections
 > 3 handling Ready
   Ready MustSync=true:
   HardState Term:1 Vote:1 Commit:5
@@ -174,6 +203,11 @@ stabilize
   3->1 MsgAppResp Term:1 Log:0/6
   3->1 MsgAppResp Term:1 Log:0/6
   3->1 MsgAppResp Term:1 Log:0/6
+> 3 receiving messages
+  2->3 MsgVote Term:2 Log:1/6
+  INFO 3 [term: 1] received a MsgVote message with higher term from 2 [term: 2]
+  INFO 3 became follower at term 2
+  INFO 3 [logterm: 1, index: 6, vote: 0] cast MsgVote for 2 [logterm: 1, index: 6] at term 2
 > 1 handling Ready
   Ready MustSync=false:
   HardState Term:1 Vote:1 Commit:6
@@ -182,69 +216,93 @@ stabilize
   Messages:
   1->2 MsgApp Term:1 Log:1/6 Commit:6
   1->3 MsgApp Term:1 Log:1/6 Commit:6
+> 3 handling Ready
+  Ready MustSync=true:
+  Lead:0 State:StateFollower
+  HardState Term:2 Vote:2 Commit:5
+  Messages:
+  3->2 MsgVoteResp Term:2 Log:0/0
 > 2 receiving messages
   1->2 MsgApp Term:1 Log:1/6 Commit:6
+  3->2 MsgVoteResp Term:2 Log:0/0
+  INFO 2 received MsgVoteResp from 3 at term 2
+  INFO 2 has received 2 MsgVoteResp votes and 0 vote rejections
+  INFO 2 became leader at term 2
 > 3 receiving messages
   1->3 MsgApp Term:1 Log:1/6 Commit:6
 > 2 handling Ready
-  Ready MustSync=false:
-  HardState Term:1 Vote:1 Commit:6
-  CommittedEntries:
-  1/6 EntryNormal "bar"
+  Ready MustSync=true:
+  Lead:2 State:StateLeader
+  Entries:
+  2/7 EntryNormal ""
   Messages:
-  2->1 MsgAppResp Term:1 Log:0/6
+  2->3 MsgApp Term:2 Log:1/6 Commit:5 Entries:[2/7 EntryNormal ""]
+  2->1 MsgAppResp Term:2 Log:0/0
 > 3 handling Ready
   Ready MustSync=false:
-  HardState Term:1 Vote:1 Commit:6
+  Messages:
+  3->1 MsgAppResp Term:2 Log:0/0
+> 1 receiving messages
+  2->1 MsgAppResp Term:2 Log:0/0
+  INFO 1 [term: 1] received a MsgAppResp message with higher term from 2 [term: 2]
+  INFO 1 became follower at term 2
+  3->1 MsgAppResp Term:2 Log:0/0
+> 3 receiving messages
+  2->3 MsgApp Term:2 Log:1/6 Commit:5 Entries:[2/7 EntryNormal ""]
+> 1 handling Ready
+  Ready MustSync=true:
+  Lead:0 State:StateFollower
+  HardState Term:2 Commit:6
+> 3 handling Ready
+  Ready MustSync=true:
+  Lead:2 State:StateFollower
+  Entries:
+  2/7 EntryNormal ""
+  Messages:
+  3->2 MsgAppResp Term:2 Log:0/7
+> 2 receiving messages
+  3->2 MsgAppResp Term:2 Log:0/7
+> 2 handling Ready
+  Ready MustSync=false:
+  HardState Term:2 Vote:2 Commit:7
   CommittedEntries:
   1/6 EntryNormal "bar"
+  2/7 EntryNormal ""
   Messages:
-  3->1 MsgAppResp Term:1 Log:0/6
-> 1 receiving messages
-  2->1 MsgAppResp Term:1 Log:0/6
-  3->1 MsgAppResp Term:1 Log:0/6
+  2->3 MsgApp Term:2 Log:2/7 Commit:7
+> 3 receiving messages
+  2->3 MsgApp Term:2 Log:2/7 Commit:7
+> 3 handling Ready
+  Ready MustSync=false:
+  HardState Term:2 Vote:2 Commit:7
+  CommittedEntries:
+  1/6 EntryNormal "bar"
+  2/7 EntryNormal ""
+  Messages:
+  3->2 MsgAppResp Term:2 Log:0/7
+> 2 receiving messages
+  3->2 MsgAppResp Term:2 Log:0/7
 
-# However not all is well. n1 is still leader but unconditionally drops all
-# proposals on the floor, so we're effectively stuck if it still heartbeats
-# its followers...
+# Upstream, n1 stayed leader, dropped every proposal and kept heartbeating, so
+# the group was stuck. In this fork n2 has taken over, and n1 is a follower
+# without a leader: nothing contacts a removed node. It drops proposals...
 propose 1 baz
 ----
+INFO 1 no leader at term 2; dropping proposal
 raft proposal dropped
 
 tick-heartbeat 1
 ----
 ok
 
-# ... which, uh oh, it does.
-# TODO(tbg): change behavior so that a leader that is removed immediately steps
-# down, and initiates an optimistic handover.
+# ...and, as a follower, sends no heartbeats.
 stabilize
 ----
-> 1 handling Ready
-  Ready MustSync=false:
-  Messages:
-  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:6
-  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:6
-> 2 receiving messages
-  1->2 MsgHeartbeat Term:1 Log:0/0 Commit:6
-> 3 receiving messages
-  1->3 MsgHeartbeat Term:1 Log:0/0 Commit:6
-> 2 handling Ready
-  Ready MustSync=false:
-  Messages:
-  2->1 MsgHeartbeatResp Term:1 Log:0/0
-> 3 handling Ready
-  Ready MustSync=false:
-  Messages:
-  3->1 MsgHeartbeatResp Term:1 Log:0/0
-> 1 receiving messages
-  2->1 MsgHeartbeatResp Term:1 Log:0/0
-  3->1 MsgHeartbeatResp Term:1 Log:0/0
+ok
 
-# Just confirming the issue above - leader does not automatically step down.
-# Expected behavior: a new leader is elected after an election timeout.
+# n2 leads at term 2.
 raft-state
 ----
-1: StateLeader (Non-Voter) Term:1 Lead:1
-2: StateFollower (Voter) Term:1 Lead:1
-3: StateFollower (Voter) Term:1 Lead:1
+1: StateFollower (Non-Voter) Term:2 Lead:0
+2: StateLeader (Voter) Term:2 Lead:2
+3: StateFollower (Voter) Term:2 Lead:2

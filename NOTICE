@@ -24,6 +24,10 @@ raftseg authors says so in its header.
         proto.Equal. raftpb/testdata/golden.jsonl, produced by the
         original package, checks all of this. Message decoding bounds the
         nesting of Responses, and raftpb builds on 64-bit platforms only.
+      - Fixes to safety, linearizable reads and liveness, validation of
+        messages from peers, and additions to the API (Config.ElectionRand,
+        ValidateMessage, ValidateConfChange). FORK.md lists and explains
+        each one.
       - Tests use internal/testutil in place of github.com/stretchr/testify,
         and internal/datadriven in place of github.com/cockroachdb/datadriven.
       - Repository plumbing was removed or replaced: CI configuration,
