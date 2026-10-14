@@ -25,7 +25,9 @@ this fork changed.
 This fork's history starts at upstream's tag v3.6.0 (commit `f35a022`, on
 upstream's `release-3.6` branch), with upstream's full history below it.
 Upstream fixes are taken with `git cherry-pick -x`, so each commit names
-the upstream commit it came from. Upstream's switch to
+the upstream commit it came from, and are listed in
+[upstream.json](upstream.json), which SBOM tools read for this fork's
+pedigree. Upstream's switch to
 `google.golang.org/protobuf` in v3.7.0, which turned message fields into
 pointers, is not taken: this fork keeps the v3.6.0 API.
 
