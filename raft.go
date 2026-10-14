@@ -34,7 +34,9 @@
 //   - a MsgTimeoutNow that arrives before pending configuration changes
 //     are applied is acted on once they are;
 //   - a node without a term rejects a pre-vote without answering, instead
-//     of panicking.
+//     of panicking;
+//   - a node that knows no leader rejects a vote request from a lower term
+//     with its term, so that the candidate can catch up.
 
 package raft
 
@@ -1355,6 +1357,18 @@ func (r *raft) Step(m pb.Message) error {
 			r.logger.Infof("%x [logterm: %d, index: %d, vote: %x] rejected %s from %x [logterm: %d, index: %d] at term %d",
 				r.id, last.term, last.index, r.Vote, m.Type, m.From, m.LogTerm, m.Index, r.Term)
 			r.send(pb.Message{To: m.From, Term: r.Term, Type: pb.MsgPreVoteResp, Reject: true})
+		} else if m.Type == pb.MsgVote && r.lead == None {
+			// Fork: a candidate whose term is behind a voter it needs can
+			// never win unless it learns the higher term. Upstream ignored
+			// the request, and another node's campaigns could keep raising
+			// that voter's term without ever reaching the candidate, so a
+			// configuration that needed both was left without a leader for
+			// good. With no leader known, reject with the term, as the Raft
+			// paper prescribes. With a leader known, keep ignoring it: a
+			// removed node then learns nothing from a healthy cluster.
+			r.logger.Infof("%x [term: %d] rejected a %s from %x with lower term %d, no leader known",
+				r.id, r.Term, m.Type, m.From, m.Term)
+			r.send(pb.Message{To: m.From, Term: r.Term, Type: pb.MsgVoteResp, Reject: true})
 		} else if m.Type == pb.MsgStorageAppendResp {
 			if m.Index != 0 {
 				// Don't consider the appended log entries to be stable because

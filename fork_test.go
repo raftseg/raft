@@ -912,3 +912,53 @@ func TestPreVoteRejectedWithoutTerm(t *testing.T) {
 		t.Fatalf("got %v", msgs)
 	}
 }
+
+// A candidate whose term is behind a voter it needs must learn the higher
+// term, or it can never win. Upstream ignored MsgVote from a lower term. In
+// a joint configuration (1)&&(6), n1 campaigned for ever at terms below
+// n6's, which a third node kept raising with campaigns of its own that
+// never reached n1: no leader for good. A node that knows no leader now
+// rejects such a vote request with its term, as the Raft paper prescribes;
+// one that knows a leader still ignores it, so that a removed node does not
+// learn the current term from a healthy cluster. Found by internal/raftsim
+// (seed 39352).
+func TestCandidateLearnsHigherTerm(t *testing.T) {
+	newNode := func(id uint64) *raft {
+		return newTestRaft(id, 10, 1, newTestMemoryStorage(withPeers(1, 6)))
+	}
+	n6 := newNode(6)
+	n6.becomeFollower(10, None)
+	n1 := newNode(1)
+	n1.becomeFollower(4, None)
+	n1.becomeCandidate() // term 5
+	if err := n6.Step(pb.Message{From: 1, To: 6, Term: n1.Term, Type: pb.MsgVote}); err != nil {
+		t.Fatal(err)
+	}
+	msgs := n6.readMessages()
+	if len(msgs) != 1 || msgs[0].Type != pb.MsgVoteResp || !msgs[0].Reject || msgs[0].Term != 10 {
+		t.Fatalf("n6 answered %v", msgs)
+	}
+	if err := n1.Step(msgs[0]); err != nil {
+		t.Fatal(err)
+	}
+	if n1.Term != 10 || n1.state != StateFollower {
+		t.Fatalf("n1 at term %d, %v", n1.Term, n1.state)
+	}
+	// Its next campaign wins n6's vote.
+	n1.becomeCandidate()
+	if err := n6.Step(pb.Message{From: 1, To: 6, Term: n1.Term, Type: pb.MsgVote}); err != nil {
+		t.Fatal(err)
+	}
+	msgs = n6.readMessages()
+	if len(msgs) != 1 || msgs[0].Type != pb.MsgVoteResp || msgs[0].Reject {
+		t.Fatalf("n6 answered %v", msgs)
+	}
+	// A node that knows a leader ignores a vote request from a lower term.
+	n6.becomeFollower(20, 1)
+	if err := n6.Step(pb.Message{From: 9, To: 6, Term: 15, Type: pb.MsgVote}); err != nil {
+		t.Fatal(err)
+	}
+	if msgs := n6.readMessages(); len(msgs) != 0 {
+		t.Fatalf("answered %v while it knows a leader", msgs)
+	}
+}

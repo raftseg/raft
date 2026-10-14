@@ -178,6 +178,18 @@ sends none. A leader whose configuration needed such a node waited for it
 indefinitely. A node now answers appends from a lower term with its own term,
 as the Raft paper prescribes. Test: `TestAnswersStaleLeader`.
 
+**A candidate behind in term learns the higher term.** Upstream ignored a
+vote request from a lower term. A candidate whose term is behind a voter it
+needs can then never win, unless something else tells it the higher term,
+and nothing need. The simulator found a joint configuration (1)&&(6) in
+which n1 campaigned for ever at terms below n6's, while n4, still on an
+older configuration that excluded n1, kept raising n6's term with
+campaigns of its own: no leader for good. A node that knows no leader now
+rejects a vote request from a lower term with its term, as the Raft paper
+prescribes. A node that knows a leader still ignores it, so that a removed
+node does not learn the current term from a healthy cluster. Test:
+`TestCandidateLearnsHigherTerm`.
+
 **A node without a term no longer panics on a pre-vote.** Raft's storage
 contract persists entries before the hard state, so a crash between the two
 can leave a node with entries of a term but no term of its own (0). Such a
