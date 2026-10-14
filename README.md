@@ -42,5 +42,5 @@ go test -run XXX -fuzz FuzzUnmarshal ./raftpb      # and FuzzUnmarshalInto, Fuzz
 
 FORK.md names the regression test for each change. Cluster-level testing
 (a deterministic simulator with raft's safety and liveness checks, soaks,
-and mutation testing of this fork) lives in the fabric project, which
-builds on this module.
+and mutation testing of this fork) lives in
+[raftseg](https://github.com/raftseg/raftseg), which builds on this module.

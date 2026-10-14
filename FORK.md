@@ -6,7 +6,8 @@ in behaviour and why it was made. Every modified file says so in its
 header, and each change is marked "Fork" in a comment where it is made.
 
 Most of these changes fix defects found in the upstream code by the
-deterministic cluster simulator of the fabric project (`internal/raftsim`).
+deterministic cluster simulator of [raftseg](https://github.com/raftseg/raftseg)
+(`internal/raftsim`).
 That simulator runs randomized clusters under message loss, duplication and
 reordering; partitions; crashes that lose unsynced writes; configuration
 changes; snapshots; leadership transfers; and reads. It checks raft's
