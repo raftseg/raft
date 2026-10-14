@@ -36,4 +36,11 @@ pointers, is not taken: this fork keeps the v3.6.0 API.
 ```
 go test ./...
 go test -short -race ./...
+go test -run XXX -fuzz FuzzStepHostile .           # hostile peer messages
+go test -run XXX -fuzz FuzzUnmarshal ./raftpb      # and FuzzUnmarshalInto, FuzzConfChangesFromString
 ```
+
+FORK.md names the regression test for each change. Cluster-level testing
+(a deterministic simulator with raft's safety and liveness checks, soaks,
+and mutation testing of this fork) lives in the fabric project, which
+builds on this module.
