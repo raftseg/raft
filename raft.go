@@ -36,7 +36,9 @@
 //   - a node without a term rejects a pre-vote without answering, instead
 //     of panicking;
 //   - a node that knows no leader rejects a vote request from a lower term
-//     with its term, so that the candidate can catch up.
+//     with its term, so that the candidate can catch up;
+//   - a follower forwards a request to its leader as a copy, leaving the
+//     message passed to Step as it was (forward).
 
 package raft
 
@@ -1960,6 +1962,44 @@ func stepCandidate(r *raft, m *pb.Message) error {
 	return nil
 }
 
+// forward returns m, a request this follower passes on, addressed to its
+// leader. Fork: it is a shallow copy (the payload is shared, not copied).
+// Upstream readdressed m itself, which the caller of Step may still hold:
+// messages were values until upstream's switch to google.golang.org/protobuf
+// made them pointers, so the caller's message changed under it, and so did
+// a message a transport delivered twice.
+func (r *raft) forward(m *pb.Message) *pb.Message {
+	fwd := shallowCopy(m)
+	fwd.To = new(r.lead)
+	return fwd
+}
+
+// shallowCopy returns a new message with m's fields; repeated and message
+// fields share m's elements. TestShallowCopyCoversEveryField checks that it
+// copies every field of the generated type.
+func shallowCopy(m *pb.Message) *pb.Message {
+	c := &pb.Message{
+		Type:       m.Type,
+		To:         m.To,
+		From:       m.From,
+		Term:       m.Term,
+		LogTerm:    m.LogTerm,
+		Index:      m.Index,
+		Entries:    m.Entries,
+		Commit:     m.Commit,
+		Vote:       m.Vote,
+		Snapshot:   m.Snapshot,
+		Reject:     m.Reject,
+		RejectHint: m.RejectHint,
+		Context:    m.Context,
+		Responses:  m.Responses,
+	}
+	if u := m.ProtoReflect().GetUnknown(); len(u) > 0 {
+		c.ProtoReflect().SetUnknown(u)
+	}
+	return c
+}
+
 func stepFollower(r *raft, m *pb.Message) error {
 	switch m.GetType() {
 	case pb.MsgProp:
@@ -1970,8 +2010,7 @@ func stepFollower(r *raft, m *pb.Message) error {
 			r.logger.Infof("%x not forwarding to leader %x at term %d; dropping proposal", r.id, r.lead, r.Term)
 			return ErrProposalDropped
 		}
-		m.To = new(r.lead)
-		r.send(m)
+		r.send(r.forward(m))
 	case pb.MsgApp:
 		r.electionElapsed = 0
 		r.lead = m.GetFrom()
@@ -1989,12 +2028,12 @@ func stepFollower(r *raft, m *pb.Message) error {
 			r.logger.Infof("%x no leader at term %d; dropping leader transfer msg", r.id, r.Term)
 			return nil
 		}
-		m.To = new(r.lead)
+		fwd := r.forward(m)
 		// Fork: a request that arrives with a term (from a peer that
 		// forwarded it already) is forwarded at ours. Upstream, send
 		// panicked on the term already set.
-		m.Term = nil
-		r.send(m)
+		fwd.Term = nil
+		r.send(fwd)
 	case pb.MsgForgetLeader:
 		if r.readOnly.option == ReadOnlyLeaseBased {
 			r.logger.Error("ignoring MsgForgetLeader due to ReadOnlyLeaseBased")
@@ -2024,8 +2063,7 @@ func stepFollower(r *raft, m *pb.Message) error {
 			r.logger.Infof("%x no leader at term %d; dropping index reading msg", r.id, r.Term)
 			return nil
 		}
-		m.To = new(r.lead)
-		r.send(m)
+		r.send(r.forward(m))
 	case pb.MsgReadIndexResp:
 		if len(m.GetEntries()) != 1 {
 			r.logger.Errorf("%x invalid format of MsgReadIndexResp from %x, entries count: %d", r.id, m.GetFrom(), len(m.GetEntries()))

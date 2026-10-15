@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	pb "github.com/raftseg/raft/raftpb"
 )
@@ -964,5 +965,62 @@ func TestCandidateLearnsHigherTerm(t *testing.T) {
 	}
 	if msgs := n6.readMessages(); len(msgs) != 0 {
 		t.Fatalf("answered %v while it knows a leader", msgs)
+	}
+}
+
+// TestShallowCopyCoversEveryField sets every field of a Message, through
+// protobuf reflection so that fields added to raft.proto are covered, and
+// checks that shallowCopy copies them all.
+func TestShallowCopyCoversEveryField(t *testing.T) {
+	m := &pb.Message{}
+	r := m.ProtoReflect()
+	fields := r.Descriptor().Fields()
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		switch {
+		case fd.IsList():
+			l := r.Mutable(fd).List()
+			l.Append(l.NewElement())
+		case fd.Kind() == protoreflect.MessageKind:
+			r.Set(fd, protoreflect.ValueOfMessage(r.NewField(fd).Message()))
+		case fd.Kind() == protoreflect.BoolKind:
+			r.Set(fd, protoreflect.ValueOfBool(true))
+		case fd.Kind() == protoreflect.BytesKind:
+			r.Set(fd, protoreflect.ValueOfBytes([]byte{1}))
+		case fd.Kind() == protoreflect.EnumKind:
+			r.Set(fd, protoreflect.ValueOfEnum(protoreflect.EnumNumber(i+1)))
+		default:
+			r.Set(fd, protoreflect.ValueOfUint64(uint64(i+1)))
+		}
+	}
+	r.SetUnknown(protoreflect.RawFields{0xf8, 0x01, 0x01}) // field 31, varint 1
+	if c := shallowCopy(m); !proto.Equal(c, m) {
+		t.Fatalf("shallowCopy dropped fields:\n got %v\nwant %v", c, m)
+	}
+}
+
+// TestStepLeavesForwardedRequestsAlone: a follower forwards proposals,
+// reads and transfer requests to its leader without changing the message
+// passed to Step. Upstream readdressed that message, which became visible
+// to the caller once messages were pointers.
+func TestStepLeavesForwardedRequestsAlone(t *testing.T) {
+	r := newTestRaft(1, 10, 1, newTestMemoryStorage(withPeers(1, 2, 3)))
+	r.becomeFollower(2, 2)
+	for _, m := range []*pb.Message{
+		{From: new(uint64(1)), To: new(uint64(1)), Type: pb.MsgProp.Enum(), Entries: []*pb.Entry{{Data: []byte("x")}}},
+		{From: new(uint64(3)), To: new(uint64(1)), Type: pb.MsgReadIndex.Enum(), Entries: []*pb.Entry{{Data: []byte("ctx")}}},
+		{From: new(uint64(3)), To: new(uint64(1)), Term: new(uint64(2)), Type: pb.MsgTransferLeader.Enum()},
+	} {
+		before := proto.Clone(m)
+		if err := r.Step(m); err != nil {
+			t.Fatalf("%v: %v", m.GetType(), err)
+		}
+		if !proto.Equal(m, before) {
+			t.Errorf("Step changed the %v it was given:\n got %v\nwant %v", m.GetType(), m, before)
+		}
+		msgs := r.readMessages()
+		if len(msgs) != 1 || msgs[0].GetTo() != 2 || msgs[0].GetType() != m.GetType() {
+			t.Errorf("%v not forwarded to the leader: %v", m.GetType(), msgs)
+		}
 	}
 }

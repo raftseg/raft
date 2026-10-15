@@ -278,6 +278,15 @@ Tests: `TestValidateMessage`, `TestValidateMessagePointers`,
 `TestStepValidates`, `TestUndecodableConfChangeDoesNotPanicLeader`,
 `FuzzStepHostile`.
 
+**Forwarded requests are copies.** A follower passes proposals, reads and
+transfer requests to its leader. Upstream readdressed the message given to
+`Step`, which was harmless while messages were values but, now that they
+are pointers, changed the caller's message under it, and a message that a
+transport delivered twice arrived the second time addressed to the leader.
+The follower now forwards a shallow copy (`forward`; the payload is shared,
+not copied). Tests: `TestStepLeavesForwardedRequestsAlone`,
+`TestShallowCopyCoversEveryField`.
+
 **Bounded message nesting.** Decoding recurses once per level of
 `Message.Responses`; without a bound, about 40 MB of crafted input (8
 million levels) exhausted the goroutine stack, which Go cannot recover
