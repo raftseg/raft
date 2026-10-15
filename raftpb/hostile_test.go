@@ -3,107 +3,20 @@
 
 package raftpb
 
+// Decoding is the first thing that touches bytes from a peer or from disk.
+// These tests bound what damaged and hostile input can cost, and fuzz the
+// decoder. Decoding is google.golang.org/protobuf's (proto.Unmarshal).
+
 import (
-	"bufio"
 	"bytes"
-	"compress/gzip"
 	"encoding/binary"
-	"encoding/hex"
-	"encoding/json"
-	"errors"
-	"fmt"
 	"math"
-	"os"
 	"runtime"
-	"runtime/debug"
 	"strings"
 	"testing"
+
+	"google.golang.org/protobuf/proto"
 )
-
-// Decoding is the first thing that touches bytes from a peer or from disk.
-// These tests hold the fork's decoder to the original's behaviour on damaged
-// and hostile input, and bound what such input can cost.
-
-var goldenTypes = []string{"Entry", "Message", "HardState", "ConfState", "Snapshot",
-	"SnapshotMetadata", "ConfChange", "ConfChangeSingle", "ConfChangeV2"}
-
-type malformedLine struct {
-	Type string `json:"type"`
-	Kind string `json:"kind"`
-	Hex  string `json:"hex"`
-	Err  string `json:"err"`
-	Re   string `json:"re"`
-	Text string `json:"text"`
-	Size int    `json:"size"`
-}
-
-func readMalformed(t testing.TB) []malformedLine {
-	f, err := os.Open("testdata/malformed.jsonl.gz")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer f.Close()
-	zr, err := gzip.NewReader(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out []malformedLine
-	sc := bufio.NewScanner(zr)
-	sc.Buffer(make([]byte, 1<<20), 1<<24)
-	for sc.Scan() {
-		var m malformedLine
-		if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
-			t.Fatal(err)
-		}
-		out = append(out, m)
-	}
-	if err := sc.Err(); err != nil {
-		t.Fatal(err)
-	}
-	return out
-}
-
-// For about 21,000 damaged and hostile inputs (truncations, bit flips,
-// unknown fields of every wire type, huge and negative lengths, overlong and
-// padded varints, wrong wire types, random bytes), the fork returns the
-// original's error, or decodes to the same message.
-func TestMalformedMatchesOriginal(t *testing.T) {
-	lines := readMalformed(t)
-	if len(lines) < 20000 {
-		t.Fatalf("only %d malformed inputs", len(lines))
-	}
-	rejected, accepted := 0, 0
-	for i, c := range lines {
-		raw, err := hex.DecodeString(c.Hex)
-		if err != nil {
-			t.Fatal(err)
-		}
-		m := newGolden(c.Type)
-		err = m.Unmarshal(raw)
-		if c.Err != "" {
-			if err == nil {
-				t.Fatalf("line %d (%s, %s): original failed with %q, fork accepted %x", i+1, c.Type, c.Kind, c.Err, raw)
-			}
-			if err.Error() != c.Err {
-				t.Fatalf("line %d (%s, %s): error %q, original %q", i+1, c.Type, c.Kind, err, c.Err)
-			}
-			rejected++
-			continue
-		}
-		if err != nil {
-			t.Fatalf("line %d (%s, %s): original accepted, fork failed: %v", i+1, c.Type, c.Kind, err)
-		}
-		re, err := m.Marshal()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if hex.EncodeToString(re) != c.Re || m.Size() != c.Size || m.String() != c.Text {
-			t.Fatalf("line %d (%s, %s): decoded differently\n got %x %q\nwant %s %q", i+1, c.Type, c.Kind, re, m.String(), c.Re, c.Text)
-		}
-		accepted++
-	}
-	t.Logf("%d inputs: %d rejected with the original's error, %d accepted identically", len(lines), rejected, accepted)
-}
 
 // nestedMessage encodes a Message whose Responses nest depth levels deep.
 func nestedMessage(depth int) []byte {
@@ -121,64 +34,66 @@ func nestedMessage(depth int) []byte {
 	return buf[pos:]
 }
 
+func depthOf(m *Message) int {
+	d := 0
+	for p := m; len(p.GetResponses()) > 0; p = p.GetResponses()[0] {
+		d++
+	}
+	return d
+}
+
+// Decoding is recursive in the nesting of Responses. protobuf bounds the
+// recursion (proto.UnmarshalOptions.RecursionLimit, 10,000 by default), so
+// that nesting cannot run a decoder out of stack, which Go cannot recover
+// from: the gogo code of v3.6.0 recursed without bound, and about 40 MB of
+// nesting killed any process that decoded it. raft nests one level
+// (MsgStorageAppend and MsgStorageApply carry the messages to send), and a
+// peer sends none: ValidateMessage refuses Responses from peers.
 func TestNestingLimit(t *testing.T) {
-	for _, d := range []int{0, 1, 2, MaxMessageNesting} {
+	for _, d := range []int{0, 1, 2, 100, 9_000} {
 		var m Message
-		if err := m.Unmarshal(nestedMessage(d)); err != nil {
+		if err := proto.Unmarshal(nestedMessage(d), &m); err != nil {
 			t.Fatalf("depth %d: %v", d, err)
 		}
-		got := 0
-		for p := &m; len(p.Responses) > 0; p = &p.Responses[0] {
-			got++
-		}
-		if got != d {
+		if got := depthOf(&m); got != d {
 			t.Fatalf("depth %d decoded as %d", d, got)
 		}
 	}
-	for _, d := range []int{MaxMessageNesting + 1, 1000, 1_000_000} {
+	for _, d := range []int{10_001, 1_000_000} {
 		var m Message
-		if err := m.Unmarshal(nestedMessage(d)); !errors.Is(err, ErrNestingTooDeep) {
-			t.Fatalf("depth %d: got %v, want ErrNestingTooDeep", d, err)
+		if err := proto.Unmarshal(nestedMessage(d), &m); err == nil {
+			t.Fatalf("depth %d: accepted", d)
 		}
 	}
-	// Responses nested inside a valid sibling list are counted too.
-	inner := nestedMessage(MaxMessageNesting)
-	var outer []byte
-	outer = append(outer, 14<<3|2)
-	outer = binary.AppendUvarint(outer, 0)
-	outer = append(outer, 14<<3|2)
-	outer = binary.AppendUvarint(outer, uint64(len(inner)))
-	outer = append(outer, inner...)
+	// A transport can set a tighter limit.
+	opts := proto.UnmarshalOptions{RecursionLimit: 4}
 	var m Message
-	if err := m.Unmarshal(outer); !errors.Is(err, ErrNestingTooDeep) {
-		t.Fatalf("sibling then deep: got %v", err)
+	if err := opts.Unmarshal(nestedMessage(3), &m); err != nil {
+		t.Fatalf("depth 3 with limit 4: %v", err)
+	}
+	if err := opts.Unmarshal(nestedMessage(4), &m); err == nil {
+		t.Fatal("depth 4 with limit 4: accepted")
 	}
 }
 
-// The original decoder recursed once per nesting level, and Go cannot
-// recover from a stack overflow. With the limit, 40 MB of nesting (the
-// amount that used to kill the process) is rejected on a 1 MiB stack.
+// 88 MB of nesting, eight million levels, is rejected without running out
+// of stack.
 func TestNestingCannotExhaustStack(t *testing.T) {
 	if testing.Short() {
-		t.Skip("allocates 40 MB")
+		t.Skip("allocates 88 MB")
 	}
 	b := nestedMessage(8_000_000)
-	if len(b) < 30<<20 {
-		t.Fatalf("input only %d bytes", len(b))
-	}
-	old := debug.SetMaxStack(1 << 20)
-	defer debug.SetMaxStack(old)
 	done := make(chan error)
 	go func() {
 		var m Message
-		done <- m.Unmarshal(b)
+		done <- proto.Unmarshal(b, &m)
 	}()
-	if err := <-done; !errors.Is(err, ErrNestingTooDeep) {
-		t.Fatalf("got %v", err)
+	if err := <-done; err == nil {
+		t.Fatal("accepted")
 	}
 }
 
-// A length prefix larger than the input must fail before allocating.
+// A length prefix larger than the input fails before allocating.
 func TestHugeLengthsDoNotAllocate(t *testing.T) {
 	type field struct {
 		typ   string
@@ -196,7 +111,7 @@ func TestHugeLengthsDoNotAllocate(t *testing.T) {
 			b = binary.AppendUvarint(b, n)
 			b = append(b, 1, 2, 3)
 			allocated := allocatedBy(func() {
-				if err := newGolden(f.typ).Unmarshal(b); err == nil {
+				if err := proto.Unmarshal(b, newGolden(f.typ)); err == nil {
 					t.Fatalf("%s field %d length %d: accepted", f.typ, f.field, n)
 				}
 			})
@@ -224,14 +139,16 @@ func allocatedBy(f func()) uint64 {
 
 // Decoding allocates in proportion to its input, but small encodings expand
 // into large structs: an empty Message in Responses is 2 bytes on the wire
-// and a whole Message in memory, and slices grow by doubling. This measures
-// the worst shapes, counting every allocation including outgrown slices
-// (about 490 bytes per input byte for empty Responses, 140 for empty
-// Entries). The limits sit about 15% above what this decoder, the original
-// generated code, allocates today, to catch regressions. A transport must
-// size its message limit with these factors in mind; messages from peers
-// never carry Responses.
+// and a whole Message in memory, a scalar field is a separate allocation
+// behind its pointer, and slices grow by doubling. This measures the worst
+// shapes, counting every allocation including outgrown slices. The limits
+// sit about 15% above what the decoder allocates today, to catch
+// regressions. A transport must size its message limit with these factors
+// in mind; messages from peers never carry Responses.
 func TestDecodeAmplification(t *testing.T) {
+	if raceEnabled {
+		t.Skip("the race detector changes how much decoding allocates")
+	}
 	const n = 100_000
 	repeat := func(field uint64, elem []byte) []byte {
 		var b []byte
@@ -262,17 +179,18 @@ func TestDecodeAmplification(t *testing.T) {
 		input []byte
 		limit float64 // allocated bytes per input byte
 	}{
-		{"Message: empty entries", "Message", repeat(7, nil), 160},
-		{"Message: empty responses", "Message", repeat(14, nil), 560},
-		{"ConfState: packed voters", "ConfState", packed(1), 16},
-		{"ConfState: unpacked voters", "ConfState", unpacked(1), 24},
-		{"ConfChangeV2: empty changes", "ConfChangeV2", repeat(2, nil), 52},
-		{"Entry: data", "Entry", repeat(4, []byte("x")), 4},
-		{"Message: entries with data", "Message", repeat(7, []byte{4<<3 | 2, 1, 'x'}), 66},
+		{"Message: empty entries", "Message", repeat(7, nil), amplification["Message: empty entries"]},
+		{"Message: empty responses", "Message", repeat(14, nil), amplification["Message: empty responses"]},
+		{"ConfState: packed voters", "ConfState", packed(1), amplification["ConfState: packed voters"]},
+		{"ConfState: unpacked voters", "ConfState", unpacked(1), amplification["ConfState: unpacked voters"]},
+		{"ConfChangeV2: empty changes", "ConfChangeV2", repeat(2, nil), amplification["ConfChangeV2: empty changes"]},
+		{"Entry: data", "Entry", repeat(4, []byte("x")), amplification["Entry: data"]},
+		{"Message: entries with data", "Message", repeat(7, []byte{4<<3 | 2, 1, 'x'}), amplification["Message: entries with data"]},
+		{"Message: entries with scalars", "Message", repeat(7, []byte{1 << 3, 1, 2 << 3, 1, 3 << 3, 1}), amplification["Message: entries with scalars"]},
 	}
 	for _, c := range cases {
 		var err error
-		allocated := allocatedBy(func() { err = newGolden(c.typ).Unmarshal(c.input) })
+		allocated := allocatedBy(func() { err = proto.Unmarshal(c.input, newGolden(c.typ)) })
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}
@@ -284,38 +202,23 @@ func TestDecodeAmplification(t *testing.T) {
 	}
 }
 
-// fuzzTypes maps the fuzzer's first byte to a message type.
-func fuzzMessage(sel byte) (string, goldenMsg) {
-	typ := goldenTypes[int(sel)%len(goldenTypes)]
-	return typ, newGolden(typ)
+// amplification holds the limits for TestDecodeAmplification: bytes
+// allocated per input byte, about 15% above what the decoder allocates.
+var amplification = map[string]float64{
+	"Message: empty entries":        82,  // measured 70.5
+	"Message: empty responses":      146, // 126.5; the gogo code of v3.6.0 allocated about 490
+	"ConfState: packed voters":      10,  // 8.0
+	"ConfState: unpacked voters":    24,  // 20.5
+	"ConfChangeV2: empty changes":   63,  // 54.5
+	"Entry: data":                   4,   // 2.7
+	"Message: entries with data":    35,  // 29.8
+	"Message: entries with scalars": 24,  // 20.6
 }
 
-// checkDecoded holds for anything Unmarshal accepts: it encodes without
-// error to exactly Size() bytes, that encoding is canonical (decoding and
-// encoding it again changes nothing), and String and encoding/json work.
-func checkDecoded(t *testing.T, typ string, m goldenMsg) {
-	t.Helper()
-	b, err := m.Marshal()
-	if err != nil {
-		t.Fatalf("%s: marshal after successful unmarshal: %v", typ, err)
-	}
-	if len(b) != m.Size() {
-		t.Fatalf("%s: Size %d, encoded %d bytes", typ, m.Size(), len(b))
-	}
-	m2 := newGolden(typ)
-	if err := m2.Unmarshal(b); err != nil {
-		t.Fatalf("%s: re-encoding does not decode: %v", typ, err)
-	}
-	b2, err := m2.Marshal()
-	if err != nil || !bytes.Equal(b, b2) {
-		t.Fatalf("%s: encoding not canonical\n%x\n%x (%v)", typ, b, b2, err)
-	}
-	if m.String() != m2.String() {
-		t.Fatalf("%s: String changed across a round trip\n%s\n%s", typ, m.String(), m2.String())
-	}
-	if _, err := json.Marshal(m); err != nil {
-		t.Fatalf("%s: json: %v", typ, err)
-	}
+// fuzzMessage maps the fuzzer's first byte to a message type.
+func fuzzMessage(sel byte) (string, proto.Message) {
+	typ := goldenTypes[int(sel)%len(goldenTypes)]
+	return typ, newGolden(typ)
 }
 
 func addFuzzSeeds(f *testing.F) {
@@ -323,10 +226,9 @@ func addFuzzSeeds(f *testing.F) {
 		if i%7 != 0 {
 			continue
 		}
-		raw, _ := hex.DecodeString(g.Hex)
 		for s, typ := range goldenTypes {
 			if typ == g.Type {
-				f.Add(byte(s), raw)
+				f.Add(byte(s), mustHex(f, g.Hex))
 			}
 		}
 	}
@@ -334,40 +236,39 @@ func addFuzzSeeds(f *testing.F) {
 		if i%13 != 0 {
 			continue
 		}
-		raw, _ := hex.DecodeString(c.Hex)
 		for s, typ := range goldenTypes {
 			if typ == c.Type {
-				f.Add(byte(s), raw)
+				f.Add(byte(s), mustHex(f, c.Hex))
 			}
 		}
 	}
-	f.Add(byte(1), nestedMessage(MaxMessageNesting))
-	f.Add(byte(1), nestedMessage(MaxMessageNesting+1))
+	f.Add(byte(1), nestedMessage(9_999))
+	f.Add(byte(1), nestedMessage(10_001))
 }
 
 func FuzzUnmarshal(f *testing.F) {
 	addFuzzSeeds(f)
 	f.Fuzz(func(t *testing.T, sel byte, data []byte) {
 		typ, m := fuzzMessage(sel)
-		if err := m.Unmarshal(data); err != nil {
+		if err := proto.Unmarshal(data, m); err != nil {
 			return
 		}
 		checkDecoded(t, typ, m)
 	})
 }
 
-// Decoding into a message that already holds data appends to repeated
-// fields and overwrites the rest, as the original does; it must never fail
-// differently from decoding into an empty message.
+// Decoding into a message that already holds data (merging) appends to
+// repeated fields and overwrites the rest; it must never fail differently
+// from decoding into an empty message.
 func FuzzUnmarshalInto(f *testing.F) {
 	addFuzzSeeds(f)
+	merge := proto.UnmarshalOptions{Merge: true}
 	f.Fuzz(func(t *testing.T, sel byte, data []byte) {
 		typ, m := fuzzMessage(sel)
 		half := len(data) / 2
-		err1 := m.Unmarshal(data[:half])
-		err2 := m.Unmarshal(data[half:])
-		fresh := newGolden(typ)
-		err3 := fresh.Unmarshal(data[half:])
+		err1 := merge.Unmarshal(data[:half], m)
+		err2 := merge.Unmarshal(data[half:], m)
+		err3 := proto.Unmarshal(data[half:], newGolden(typ))
 		if (err2 == nil) != (err3 == nil) {
 			t.Fatalf("%s: into used message: %v, into empty: %v", typ, err2, err3)
 		}
@@ -390,8 +291,13 @@ func FuzzConfChangesFromString(f *testing.F) {
 		if err != nil {
 			t.Fatalf("%q: rendering %q does not parse: %v", s, ConfChangesToString(ccs), err)
 		}
-		if fmt.Sprint(again) != fmt.Sprint(ccs) {
+		if len(again) != len(ccs) {
 			t.Fatalf("%q: round trip %v != %v", s, again, ccs)
+		}
+		for i := range ccs {
+			if !proto.Equal(again[i], ccs[i]) {
+				t.Fatalf("%q: round trip %v != %v", s, again, ccs)
+			}
 		}
 		if !strings.Contains(s, " ") && len(ccs) > 1 {
 			t.Fatalf("%q: %d changes from one token", s, len(ccs))

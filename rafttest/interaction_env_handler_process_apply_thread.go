@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/raftseg/raft/internal/datadriven"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/raftseg/raft"
 	"github.com/raftseg/raft/raftpb"
@@ -55,11 +56,11 @@ func (env *InteractionEnv) ProcessApplyThread(idx int) error {
 	m := n.ApplyWork[0]
 	n.ApplyWork = n.ApplyWork[1:]
 
-	resps := m.Responses
+	resps := m.GetResponses()
 	m.Responses = nil
 	env.Output.WriteString("Processing:\n")
 	env.Output.WriteString(raft.DescribeMessage(m, defaultEntryFormatter) + "\n")
-	if err := processApply(n, m.Entries); err != nil {
+	if err := processApply(n, m.GetEntries()); err != nil {
 		return err
 	}
 
@@ -71,43 +72,43 @@ func (env *InteractionEnv) ProcessApplyThread(idx int) error {
 	return nil
 }
 
-func processApply(n *Node, ents []raftpb.Entry) error {
+func processApply(n *Node, ents []*raftpb.Entry) error {
 	for _, ent := range ents {
 		var update []byte
 		var cs *raftpb.ConfState
-		switch ent.Type {
+		switch ent.GetType() {
 		case raftpb.EntryConfChange:
-			var cc raftpb.ConfChange
-			if err := cc.Unmarshal(ent.Data); err != nil {
+			cc := &raftpb.ConfChange{}
+			if err := proto.Unmarshal(ent.GetData(), cc); err != nil {
 				return err
 			}
 			update = cc.Context
 			cs = n.RawNode.ApplyConfChange(cc)
 		case raftpb.EntryConfChangeV2:
-			var cc raftpb.ConfChangeV2
-			if err := cc.Unmarshal(ent.Data); err != nil {
+			cc := &raftpb.ConfChangeV2{}
+			if err := proto.Unmarshal(ent.GetData(), cc); err != nil {
 				return err
 			}
 			cs = n.RawNode.ApplyConfChange(cc)
 			update = cc.Context
 		default:
-			update = ent.Data
+			update = ent.GetData()
 		}
 
 		// Record the new state by starting with the current state and applying
 		// the command.
 		lastSnap := n.History[len(n.History)-1]
-		var snap raftpb.Snapshot
+		snap := raftpb.EnsureSnapshot(nil)
 		snap.Data = append(snap.Data, lastSnap.Data...)
 		// NB: this hard-codes an "appender" state machine.
 		snap.Data = append(snap.Data, update...)
-		snap.Metadata.Index = ent.Index
-		snap.Metadata.Term = ent.Term
+		snap.Metadata.Index = new(ent.GetIndex())
+		snap.Metadata.Term = new(ent.GetTerm())
 		if cs == nil {
 			sl := n.History
-			cs = &sl[len(sl)-1].Metadata.ConfState
+			cs = sl[len(sl)-1].GetMetadata().GetConfState()
 		}
-		snap.Metadata.ConfState = *cs
+		snap.Metadata.ConfState = cs
 		n.History = append(n.History, snap)
 	}
 	return nil

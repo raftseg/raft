@@ -17,7 +17,11 @@
 
 package raft
 
-import pb "github.com/raftseg/raft/raftpb"
+import (
+	"google.golang.org/protobuf/proto"
+
+	pb "github.com/raftseg/raft/raftpb"
+)
 
 // unstable contains "unstable" log entries and snapshot state that has
 // not yet been written to Storage. The type serves two roles. First, it
@@ -37,7 +41,7 @@ type unstable struct {
 	// the incoming unstable snapshot, if any.
 	snapshot *pb.Snapshot
 	// all entries that have not yet been written to storage.
-	entries []pb.Entry
+	entries []*pb.Entry
 	// entries[i] has raft log position i+offset.
 	offset uint64
 
@@ -56,7 +60,7 @@ type unstable struct {
 // if it has a snapshot.
 func (u *unstable) maybeFirstIndex() (uint64, bool) {
 	if u.snapshot != nil {
-		return u.snapshot.Metadata.Index + 1, true
+		return u.snapshot.GetMetadata().GetIndex() + 1, true
 	}
 	return 0, false
 }
@@ -68,7 +72,7 @@ func (u *unstable) maybeLastIndex() (uint64, bool) {
 		return u.offset + uint64(l) - 1, true
 	}
 	if u.snapshot != nil {
-		return u.snapshot.Metadata.Index, true
+		return u.snapshot.GetMetadata().GetIndex(), true
 	}
 	return 0, false
 }
@@ -77,8 +81,8 @@ func (u *unstable) maybeLastIndex() (uint64, bool) {
 // is any.
 func (u *unstable) maybeTerm(i uint64) (uint64, bool) {
 	if i < u.offset {
-		if u.snapshot != nil && u.snapshot.Metadata.Index == i {
-			return u.snapshot.Metadata.Term, true
+		if u.snapshot != nil && u.snapshot.GetMetadata().GetIndex() == i {
+			return u.snapshot.GetMetadata().GetTerm(), true
 		}
 		return 0, false
 	}
@@ -91,12 +95,12 @@ func (u *unstable) maybeTerm(i uint64) (uint64, bool) {
 		return 0, false
 	}
 
-	return u.entries[i-u.offset].Term, true
+	return u.entries[i-u.offset].GetTerm(), true
 }
 
 // nextEntries returns the unstable entries that are not already in the process
 // of being written to storage.
-func (u *unstable) nextEntries() []pb.Entry {
+func (u *unstable) nextEntries() []*pb.Entry {
 	inProgress := int(u.offsetInProgress - u.offset)
 	if len(u.entries) == inProgress {
 		return nil
@@ -110,7 +114,7 @@ func (u *unstable) nextSnapshot() *pb.Snapshot {
 	if u.snapshot == nil || u.snapshotInProgress {
 		return nil
 	}
-	return u.snapshot
+	return proto.Clone(u.snapshot).(*pb.Snapshot)
 }
 
 // acceptInProgress marks all entries and the snapshot, if any, in the unstable
@@ -121,7 +125,7 @@ func (u *unstable) nextSnapshot() *pb.Snapshot {
 func (u *unstable) acceptInProgress() {
 	if len(u.entries) > 0 {
 		// NOTE: +1 because offsetInProgress is exclusive, like offset.
-		u.offsetInProgress = u.entries[len(u.entries)-1].Index + 1
+		u.offsetInProgress = u.entries[len(u.entries)-1].GetIndex() + 1
 	}
 	if u.snapshot != nil {
 		u.snapshotInProgress = true
@@ -163,41 +167,32 @@ func (u *unstable) stableTo(id entryID) {
 }
 
 // shrinkEntriesArray discards the underlying array used by the entries slice
-// if most of it isn't being used. This avoids holding references to a bunch of
+// if it isn't being used. This avoids holding references to a bunch of
 // potentially large entries that aren't needed anymore. Simply clearing the
 // entries wouldn't be safe because clients might still be using them.
 func (u *unstable) shrinkEntriesArray() {
-	// We replace the array if we're using less than half of the space in
-	// it. This number is fairly arbitrary, chosen as an attempt to balance
-	// memory usage vs number of allocations. It could probably be improved
-	// with some focused tuning.
-	const lenMultiple = 2
 	if len(u.entries) == 0 {
 		u.entries = nil
-	} else if len(u.entries)*lenMultiple < cap(u.entries) {
-		newEntries := make([]pb.Entry, len(u.entries))
-		copy(newEntries, u.entries)
-		u.entries = newEntries
 	}
 }
 
 func (u *unstable) stableSnapTo(i uint64) {
-	if u.snapshot != nil && u.snapshot.Metadata.Index == i {
+	if u.snapshot != nil && u.snapshot.GetMetadata().GetIndex() == i {
 		u.snapshot = nil
 		u.snapshotInProgress = false
 	}
 }
 
-func (u *unstable) restore(s pb.Snapshot) {
-	u.offset = s.Metadata.Index + 1
+func (u *unstable) restore(s *pb.Snapshot) {
+	u.offset = s.GetMetadata().GetIndex() + 1
 	u.offsetInProgress = u.offset
 	u.entries = nil
-	u.snapshot = &s
+	u.snapshot = proto.Clone(s).(*pb.Snapshot)
 	u.snapshotInProgress = false
 }
 
-func (u *unstable) truncateAndAppend(ents []pb.Entry) {
-	fromIndex := ents[0].Index
+func (u *unstable) truncateAndAppend(ents []*pb.Entry) {
+	fromIndex := ents[0].GetIndex()
 	switch {
 	case fromIndex == u.offset+uint64(len(u.entries)):
 		// fromIndex is the next index in the u.entries, so append directly.
@@ -225,10 +220,10 @@ func (u *unstable) truncateAndAppend(ents []pb.Entry) {
 // will panic. The returned slice can be appended to, but the entries in it must
 // not be changed because they are still shared with unstable.
 //
-// TODO(pavelkalinnikov): this, and similar []pb.Entry slices, may bubble up all
+// TODO(pavelkalinnikov): this, and similar []*pb.Entry slices, may bubble up all
 // the way to the application code through Ready struct. Protect other slices
 // similarly, and document how the client can use them.
-func (u *unstable) slice(lo uint64, hi uint64) []pb.Entry {
+func (u *unstable) slice(lo uint64, hi uint64) []*pb.Entry {
 	u.mustCheckOutOfBounds(lo, hi)
 	// NB: use the full slice expression to limit what the caller can do with the
 	// returned slice. For example, an append will reallocate and copy this slice

@@ -13,7 +13,8 @@ To keep the codebase small as well as provide flexibility, the library only impl
 
 In order to easily test the Raft library, its behavior should be deterministic. To achieve this determinism, the library models Raft as a state machine.  The state machine takes a `Message` as input. A message can either be a local timer update or a network message sent from a remote peer. The state machine's output is a 3-tuple `{[]Messages, []LogEntries, NextState}` consisting of an array of `Messages`, `log entries`, and `Raft state changes`. For state machines with the same state, the same state machine input should always generate the same state machine output.
 
-A simple example application, _raftexample_, is also available to help illustrate how to use this package in practice: https://github.com/etcd-io/etcd/tree/main/contrib/raftexample
+A simple example application, _raftexample_, is also available to help illustrate how to use this package in practice:
+https://github.com/etcd-io/etcd/tree/release-3.7/contrib/raftexample
 
 # Features
 
@@ -117,7 +118,7 @@ First, read from the Node.Ready() channel and process the updates it contains. T
 
 2. Send all Messages to the nodes named in the To field. It is important that no messages be sent until the latest HardState has been persisted to disk, and all Entries written by any previous Ready batch (Messages may be sent while entries from the same batch are being persisted). To reduce the I/O latency, an optimization can be applied to make leader write to disk in parallel with its followers (as explained at section 10.2.1 in Raft thesis). If any Message has type MsgSnap, call Node.ReportSnapshot() after it has been sent (these messages may be large). Note: Marshalling messages is not thread-safe; it is important to make sure that no new entries are persisted while marshalling. The easiest way to achieve this is to serialise the messages directly inside the main raft loop.
 
-3. Apply Snapshot (if any) and CommittedEntries to the state machine. If any committed Entry has Type EntryConfChange, call Node.ApplyConfChange() to apply it to the node. The configuration change may be cancelled at this point by setting the NodeID field to zero before calling ApplyConfChange (but ApplyConfChange must be called one way or the other, and the decision to cancel must be based solely on the state machine and not external information such as the observed health of the node).
+3. Apply Snapshot (if any) and CommittedEntries to the state machine. If any committed Entry has Type EntryConfChange, call Node.ApplyConfChange() to apply it to the node. The configuration change may be cancelled at this point by setting the NodeId field to zero before calling ApplyConfChange (but ApplyConfChange must be called one way or the other, and the decision to cancel must be based solely on the state machine and not external information such as the observed health of the node).
 
 4. Call Node.Advance() to signal readiness for the next batch of updates. This may be done at any time after step 1, although all updates must be processed in the order they were returned by Ready.
 
@@ -126,7 +127,7 @@ Second, all persisted log entries must be made available via an implementation o
 Third, after receiving a message from another node, pass it to Node.Step:
 
 ```go
-	func recvRaftRPC(ctx context.Context, m raftpb.Message) {
+	func recvRaftRPC(ctx context.Context, m *raftpb.Message) {
 		n.Step(ctx, m)
 	}
 ```
@@ -148,9 +149,9 @@ The total state machine handling loop will look something like this:
       }
       for _, entry := range rd.CommittedEntries {
         process(entry)
-        if entry.Type == raftpb.EntryConfChange {
+        if entry.GetType() == raftpb.EntryConfChange {
           var cc raftpb.ConfChange
-          cc.Unmarshal(entry.Data)
+          proto.Unmarshal(entry.GetData(), &cc)
           s.Node.ApplyConfChange(cc)
         }
       }
@@ -179,7 +180,7 @@ After config change is committed, some committed entry with type raftpb.EntryCon
 
 ```go
 	var cc raftpb.ConfChange
-	cc.Unmarshal(data)
+	proto.Unmarshal(data, &cc)
 	n.ApplyConfChange(cc)
 ```
 

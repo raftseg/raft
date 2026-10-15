@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	pb "github.com/raftseg/raft/raftpb"
 )
 
@@ -95,20 +97,20 @@ type adversaryNode struct {
 }
 
 func newAdversaryNode(t *testing.T, src *byteSource) *adversaryNode {
-	cs := pb.ConfState{Voters: []uint64{1, 2, 3}, Learners: []uint64{4}}
+	cs := &pb.ConfState{Voters: []uint64{1, 2, 3}, Learners: []uint64{4}}
 	s := NewMemoryStorage()
-	snap := pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 5, Term: 1, ConfState: cs}}
+	snap := &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(5)), Term: new(uint64(1)), ConfState: cs}}
 	if err := s.ApplySnapshot(snap); err != nil {
 		t.Fatal(err)
 	}
-	var ents []pb.Entry
+	var ents []*pb.Entry
 	for i := uint64(6); i <= 12; i++ {
-		ents = append(ents, pb.Entry{Index: i, Term: 1 + (i-6)/3})
+		ents = append(ents, &pb.Entry{Index: new(i), Term: new(1 + (i-6)/3)})
 	}
 	if err := s.Append(ents); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetHardState(pb.HardState{Term: 3, Commit: 9}); err != nil {
+	if err := s.SetHardState(&pb.HardState{Term: new(uint64(3)), Commit: new(uint64(9))}); err != nil {
 		t.Fatal(err)
 	}
 	id := []uint64{1, 1, 1, 4}[src.intn(4)] // mostly a voter, sometimes the learner
@@ -136,8 +138,8 @@ func newAdversaryNode(t *testing.T, src *byteSource) *adversaryNode {
 		_ = rn.Campaign()
 		n.handle()
 		for _, from := range []uint64{2, 3} {
-			_ = rn.Step(pb.Message{From: from, To: id, Term: rn.raft.Term, Type: pb.MsgVoteResp})
-			_ = rn.Step(pb.Message{From: from, To: id, Term: rn.raft.Term, Type: pb.MsgPreVoteResp})
+			_ = rn.Step(&pb.Message{From: new(from), To: new(id), Term: new(rn.raft.Term), Type: pb.MsgVoteResp.Enum()})
+			_ = rn.Step(&pb.Message{From: new(from), To: new(id), Term: new(rn.raft.Term), Type: pb.MsgPreVoteResp.Enum()})
 		}
 		n.handle()
 	}
@@ -150,14 +152,14 @@ func (n *adversaryNode) handle() {
 		rd := n.rn.Ready()
 		if n.async {
 			for _, m := range rd.Messages {
-				switch m.To {
+				switch m.GetTo() {
 				case LocalAppendThread:
 					if m.Snapshot != nil {
-						_ = n.s.ApplySnapshot(*m.Snapshot)
+						_ = n.s.ApplySnapshot(m.Snapshot)
 					}
 					_ = n.s.Append(m.Entries)
-					if m.Term != 0 || m.Vote != 0 || m.Commit != 0 {
-						_ = n.s.SetHardState(pb.HardState{Term: m.Term, Vote: m.Vote, Commit: m.Commit})
+					if m.GetTerm() != 0 || m.GetVote() != 0 || m.GetCommit() != 0 {
+						_ = n.s.SetHardState(&pb.HardState{Term: m.Term, Vote: m.Vote, Commit: m.Commit})
 					}
 				case LocalApplyThread:
 					n.applyConfChanges(m.Entries)
@@ -165,7 +167,7 @@ func (n *adversaryNode) handle() {
 					continue
 				}
 				for _, r := range m.Responses {
-					if r.To == n.rn.raft.id || IsLocalMsgTarget(r.To) {
+					if r.GetTo() == n.rn.raft.id || IsLocalMsgTarget(r.GetTo()) {
 						_ = n.rn.Step(r)
 					}
 				}
@@ -184,19 +186,19 @@ func (n *adversaryNode) handle() {
 	}
 }
 
-func (n *adversaryNode) applyConfChanges(ents []pb.Entry) {
+func (n *adversaryNode) applyConfChanges(ents []*pb.Entry) {
 	for _, e := range ents {
 		var cc pb.ConfChangeI
-		switch e.Type {
+		switch e.GetType() {
 		case pb.EntryConfChange:
-			var c pb.ConfChange
-			if c.Unmarshal(e.Data) != nil {
+			c := &pb.ConfChange{}
+			if proto.Unmarshal(e.Data, c) != nil {
 				continue
 			}
 			cc = c
 		case pb.EntryConfChangeV2:
-			var c pb.ConfChangeV2
-			if c.Unmarshal(e.Data) != nil {
+			c := &pb.ConfChangeV2{}
+			if proto.Unmarshal(e.Data, c) != nil {
 				continue
 			}
 			cc = c
@@ -212,14 +214,14 @@ func (n *adversaryNode) applyConfChanges(ents []pb.Entry) {
 	}
 }
 
-func checkApplicable(rn *RawNode, cc pb.ConfChangeV2) error {
+func checkApplicable(rn *RawNode, cc *pb.ConfChangeV2) error {
 	cs := rn.raft.trk.ConfState()
 	return ValidateConfChange(cs, cc)
 }
 
 // hostileMessage builds a message from fuzz input, near the node's state so
 // that it gets past the term checks often.
-func hostileMessage(src *byteSource, rn *RawNode) pb.Message {
+func hostileMessage(src *byteSource, rn *RawNode) *pb.Message {
 	r := rn.raft
 	// A transport sets From to the authenticated sender: another node.
 	var peers []uint64
@@ -229,52 +231,52 @@ func hostileMessage(src *byteSource, rn *RawNode) pb.Message {
 		}
 	}
 	ids := []uint64{1, 2, 3, 4, 5, 0, LocalAppendThread, LocalApplyThread}
-	m := pb.Message{
-		Type:       pb.MessageType(src.intn(25)),
-		From:       peers[src.intn(len(peers))],
-		To:         r.id,
-		Term:       src.near(r.Term),
-		LogTerm:    src.near(r.raftLog.lastEntryID().term),
-		Index:      src.near(r.raftLog.lastIndex()),
-		Commit:     src.near(r.raftLog.committed),
-		Vote:       uint64(src.intn(5)),
-		Reject:     src.intn(3) == 0,
-		RejectHint: src.near(r.raftLog.lastIndex()),
+	m := &pb.Message{
+		Type:       pb.MessageType(pb.MessageType(src.intn(25))).Enum(),
+		From:       new(peers[src.intn(len(peers))]),
+		To:         new(r.id),
+		Term:       new(src.near(r.Term)),
+		LogTerm:    new(src.near(r.raftLog.lastEntryID().term)),
+		Index:      new(src.near(r.raftLog.lastIndex())),
+		Commit:     new(src.near(r.raftLog.committed)),
+		Vote:       new(uint64(src.intn(5))),
+		Reject:     new(bool(src.intn(3) == 0)),
+		RejectHint: new(src.near(r.raftLog.lastIndex())),
 	}
 	if src.intn(8) == 0 {
-		m.To = ids[src.intn(len(ids))]
+		m.To = new(ids[src.intn(len(ids))])
 	}
 	if src.intn(3) == 0 {
 		m.Context = []byte{src.byte()}
 	}
 	nents := src.intn(4)
-	idx, term := m.Index, m.LogTerm
+	idx, term := m.GetIndex(), m.GetLogTerm()
 	for i := 0; i < nents; i++ {
-		e := pb.Entry{Type: pb.EntryType(src.intn(4))}
+		e := &pb.Entry{Type: pb.EntryType(pb.EntryType(src.intn(4))).Enum()}
 		if src.intn(4) == 0 {
-			e.Index, e.Term = src.near(idx+1), src.near(term)
+			e.Index, e.Term = new(src.near(idx+1)), new(src.near(term))
 		} else {
-			e.Index, e.Term = idx+1, term+uint64(src.intn(2))
+			e.Index, e.Term = new(idx+1), new(term+uint64(src.intn(2)))
 		}
-		idx, term = e.Index, e.Term
-		switch e.Type {
+		idx, term = e.GetIndex(), e.GetTerm()
+		switch e.GetType() {
 		case pb.EntryConfChange:
-			cc := pb.ConfChange{Type: pb.ConfChangeType(src.intn(5)), NodeID: uint64(src.intn(7))}
-			e.Data, _ = cc.Marshal()
+			cc := &pb.ConfChange{Type: pb.ConfChangeType(pb.ConfChangeType(src.intn(5))).Enum(), NodeId: new(uint64(src.intn(7)))}
+			e.Data, _ = proto.Marshal(cc)
 		case pb.EntryConfChangeV2:
-			cc := pb.ConfChangeV2{Transition: pb.ConfChangeTransition(src.intn(4))}
+			cc := &pb.ConfChangeV2{Transition: pb.ConfChangeTransition(pb.ConfChangeTransition(src.intn(4))).Enum()}
 			for j := src.intn(3); j > 0; j-- {
-				cc.Changes = append(cc.Changes, pb.ConfChangeSingle{Type: pb.ConfChangeType(src.intn(5)), NodeID: uint64(src.intn(7))})
+				cc.Changes = append(cc.Changes, &pb.ConfChangeSingle{Type: pb.ConfChangeType(pb.ConfChangeType(src.intn(5))).Enum(), NodeId: new(uint64(src.intn(7)))})
 			}
-			e.Data, _ = cc.Marshal()
+			e.Data, _ = proto.Marshal(cc)
 		}
 		if src.intn(6) == 0 {
 			e.Data = []byte{src.byte(), src.byte()}
 		}
 		m.Entries = append(m.Entries, e)
 	}
-	if m.Type == pb.MsgSnap || src.intn(10) == 0 {
-		var cs pb.ConfState
+	if m.GetType() == pb.MsgSnap || src.intn(10) == 0 {
+		cs := &pb.ConfState{}
 		for j := src.intn(4); j > 0; j-- {
 			cs.Voters = append(cs.Voters, uint64(src.intn(6)))
 		}
@@ -285,9 +287,9 @@ func hostileMessage(src *byteSource, rn *RawNode) pb.Message {
 			cs.VotersOutgoing = []uint64{uint64(src.intn(6))}
 			cs.LearnersNext = []uint64{uint64(src.intn(6))}
 		}
-		m.Snapshot = &pb.Snapshot{Metadata: pb.SnapshotMetadata{
-			Index:     src.near(r.raftLog.lastIndex() + 5),
-			Term:      src.near(r.Term),
+		m.Snapshot = &pb.Snapshot{Metadata: &pb.SnapshotMetadata{
+			Index:     new(src.near(r.raftLog.lastIndex() + 5)),
+			Term:      new(src.near(r.Term)),
 			ConfState: cs,
 		}}
 		if src.intn(5) == 0 {
@@ -295,7 +297,7 @@ func hostileMessage(src *byteSource, rn *RawNode) pb.Message {
 		}
 	}
 	if src.intn(12) == 0 {
-		m.Responses = []pb.Message{{Type: pb.MsgAppResp, From: r.id, To: r.id}}
+		m.Responses = []*pb.Message{{Type: pb.MsgAppResp.Enum(), From: new(r.id), To: new(r.id)}}
 	}
 	return m
 }

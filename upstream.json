@@ -1,21 +1,12 @@
 {
-  "comment": "Where this fork comes from, for SBOMs. Update cherryPicked with every commit taken from upstream.",
+  "comment": "Where this fork comes from, for SBOMs: the upstream commit merged last (version is its Go pseudo-version, sum its module hash). List in cherryPicked every commit taken from upstream since.",
   "module": "go.etcd.io/raft/v3",
-  "version": "v3.6.0",
+  "version": "v3.7.0-rc.0.0.20261009205358-638f42739b77",
   "repository": "https://github.com/etcd-io/raft",
-  "commit": "f35a02212416d045c574e30aa59d4b07c4b8d732",
-  "sum": "h1:ivIsvx8xlDzzkTgvTSMUvyxbNFf+0TvAYVM0Kl4rze8=",
+  "commit": "638f42739b77572b5708eb0d8a776a272ade71ed",
+  "sum": "h1:1cYRcFEGJfQaPpFzTqit0XRxky9/Oow8Bsiq7u1CTGU=",
   "license": "Apache-2.0",
   "copyright": "The etcd Authors",
   "changes": "FORK.md",
-  "cherryPicked": [
-    {
-      "commit": "9b9d6ee9b50d02cb950492e5434576866d5aec9b",
-      "subject": "raft: test with duplicate `MsgReadIndex` requests and delayed heartbeats"
-    },
-    {
-      "commit": "63903dd1ecd953554ff835b6ec85e1e15f2735c6",
-      "subject": "raft: use unique index as heartbeat ctxes for read-only operations"
-    }
-  ]
+  "cherryPicked": []
 }

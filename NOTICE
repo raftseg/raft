@@ -8,22 +8,16 @@ Neither project ships a NOTICE file of its own. Every file modified by the
 raftseg authors says so in its header.
 
 ./  (the whole module except internal/)
-    Origin:     etcd raft, go.etcd.io/raft/v3 v3.6.0
-                https://github.com/etcd-io/raft, tag v3.6.0,
-                commit f35a02212416d045c574e30aa59d4b07c4b8d732
+    Origin:     etcd raft, go.etcd.io/raft/v3, branch main at
+                commit 638f42739b77572b5708eb0d8a776a272ade71ed
+                (v3.7.0-rc.0.0.20261009205358-638f42739b77), which holds
+                every change of tag v3.7.0; https://github.com/etcd-io/raft
     Copyright:  The etcd Authors
     License:    LICENSE
     Changes:
-      - Import paths rewritten from go.etcd.io/raft/v3 to this module.
-      - raftpb no longer depends on github.com/gogo/protobuf or
-        github.com/golang/protobuf. The generated Marshal, Unmarshal and
-        Size code is unchanged, so the wire format is byte-for-byte the
-        same. Descriptor registration and the XXX_ methods were removed.
-        String() and JSON enum decoding were reimplemented in
-        raftpb/compat.go. ConfChangeV2.LeaveJoint no longer calls
-        proto.Equal. raftpb/testdata/golden.jsonl, produced by the
-        original package, checks all of this. Message decoding bounds the
-        nesting of Responses, and raftpb builds on 64-bit platforms only.
+      - Import paths rewritten from go.etcd.io/raft/v3 to this module, and
+        raftpb's go_package with them (raft.proto, and the descriptor in
+        raft.pb.go, whose code is otherwise protoc-gen-go's).
       - Fixes to safety, linearizable reads and liveness, validation of
         messages from peers, and additions to the API (Config.ElectionRand,
         ValidateMessage, ValidateConfChange). FORK.md lists and explains
@@ -31,12 +25,13 @@ raftseg authors says so in its header.
       - Tests use internal/testutil in place of github.com/stretchr/testify,
         and internal/datadriven in place of github.com/cockroachdb/datadriven.
       - Repository plumbing was removed or replaced: CI configuration,
-        Makefile, scripts, tools, OWNERS, .golangci.yaml, .go-version and
-        go.sum. README.md was renamed to UPSTREAM-README.md.
+        Makefile, scripts, tools, OWNERS, code-of-conduct.md,
+        .golangci.yaml and .go-version. README.md was renamed to
+        UPSTREAM-README.md.
 
 internal/datadriven/  (used by tests only)
     Origin:     github.com/cockroachdb/datadriven
-                v1.0.3-0.20250407164829-2945557346d5
+                v1.0.3
     Copyright:  The Cockroach Authors
     License:    internal/datadriven/LICENSE
     Changes:    The github.com/pmezard/go-difflib dependency was replaced
@@ -47,3 +42,7 @@ internal/testutil/  (used by tests only)
     github.com/stretchr/testify (MIT), so that the upstream tests run
     unchanged. No testify code is included. testdata/testifycompat
     compares the two directly.
+
+Dependencies (not included)
+    google.golang.org/protobuf v1.36.12, Google's protobuf runtime
+    (BSD 3-Clause), which raftpb's generated code requires.

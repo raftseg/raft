@@ -21,6 +21,8 @@ package raft
 import (
 	"fmt"
 
+	"google.golang.org/protobuf/proto"
+
 	pb "github.com/raftseg/raft/raftpb"
 )
 
@@ -132,11 +134,11 @@ func (l *raftLog) maybeAppend(a logSlice, committed uint64) (lastnewi uint64, ok
 	return lastnewi, true
 }
 
-func (l *raftLog) append(ents ...pb.Entry) uint64 {
+func (l *raftLog) append(ents ...*pb.Entry) uint64 {
 	if len(ents) == 0 {
 		return l.lastIndex()
 	}
-	if after := ents[0].Index - 1; after < l.committed {
+	if after := ents[0].GetIndex() - 1; after < l.committed {
 		l.logger.Panicf("after(%d) is out of range [committed(%d)]", after, l.committed)
 	}
 	l.unstable.truncateAndAppend(ents)
@@ -153,9 +155,9 @@ func (l *raftLog) append(ents ...pb.Entry) uint64 {
 // An entry is considered to be conflicting if it has the same index but
 // a different term.
 // The index of the given entries MUST be continuously increasing.
-func (l *raftLog) findConflict(ents []pb.Entry) uint64 {
+func (l *raftLog) findConflict(ents []*pb.Entry) uint64 {
 	for i := range ents {
-		if id := pbEntryID(&ents[i]); !l.matchTerm(id) {
+		if id := pbEntryID(ents[i]); !l.matchTerm(id) {
 			if id.index <= l.lastIndex() {
 				// TODO(pav-kv): can simply print %+v of the id. This will change the
 				// log format though.
@@ -197,7 +199,7 @@ func (l *raftLog) findConflictByTerm(index uint64, term uint64) (uint64, uint64)
 
 // nextUnstableEnts returns all entries that are available to be written to the
 // local stable log and are not already in-progress.
-func (l *raftLog) nextUnstableEnts() []pb.Entry {
+func (l *raftLog) nextUnstableEnts() []*pb.Entry {
 	return l.unstable.nextEntries()
 }
 
@@ -219,7 +221,7 @@ func (l *raftLog) hasNextOrInProgressUnstableEnts() bool {
 // appended them to the local raft log yet. If allowUnstable is true, committed
 // entries from the unstable log may be returned; otherwise, only entries known
 // to reside locally on stable storage will be returned.
-func (l *raftLog) nextCommittedEnts(allowUnstable bool) (ents []pb.Entry) {
+func (l *raftLog) nextCommittedEnts(allowUnstable bool) (ents []*pb.Entry) {
 	if l.applyingEntsPaused {
 		// Entry application outstanding size limit reached.
 		return nil
@@ -293,9 +295,9 @@ func (l *raftLog) hasNextOrInProgressSnapshot() bool {
 	return l.unstable.snapshot != nil
 }
 
-func (l *raftLog) snapshot() (pb.Snapshot, error) {
+func (l *raftLog) snapshot() (*pb.Snapshot, error) {
 	if l.unstable.snapshot != nil {
-		return *l.unstable.snapshot, nil
+		return proto.Clone(l.unstable.snapshot).(*pb.Snapshot), nil
 	}
 	return l.storage.Snapshot()
 }
@@ -424,7 +426,7 @@ func (l *raftLog) term(i uint64) (uint64, error) {
 	panic(err) // TODO(bdarnell)
 }
 
-func (l *raftLog) entries(i uint64, maxSize entryEncodingSize) ([]pb.Entry, error) {
+func (l *raftLog) entries(i uint64, maxSize entryEncodingSize) ([]*pb.Entry, error) {
 	if i > l.lastIndex() {
 		return nil, nil
 	}
@@ -432,7 +434,7 @@ func (l *raftLog) entries(i uint64, maxSize entryEncodingSize) ([]pb.Entry, erro
 }
 
 // allEntries returns all entries in the log.
-func (l *raftLog) allEntries() []pb.Entry {
+func (l *raftLog) allEntries() []*pb.Entry {
 	ents, err := l.entries(l.firstIndex(), noLimit)
 	if err == nil {
 		return ents
@@ -475,9 +477,9 @@ func (l *raftLog) maybeCommit(at entryID) bool {
 	return false
 }
 
-func (l *raftLog) restore(s pb.Snapshot) {
-	l.logger.Infof("log [%s] starts to restore snapshot [index: %d, term: %d]", l, s.Metadata.Index, s.Metadata.Term)
-	l.committed = s.Metadata.Index
+func (l *raftLog) restore(s *pb.Snapshot) {
+	l.logger.Infof("log [%s] starts to restore snapshot [index: %d, term: %d]", l, s.GetMetadata().GetIndex(), s.GetMetadata().GetTerm())
+	l.committed = s.GetMetadata().GetIndex()
 	l.unstable.restore(s)
 }
 
@@ -491,7 +493,7 @@ func (l *raftLog) restore(s pb.Snapshot) {
 //
 // If the callback returns an error, scan terminates and returns this error
 // immediately. This can be used to stop the scan early ("break" the loop).
-func (l *raftLog) scan(lo, hi uint64, pageSize entryEncodingSize, v func([]pb.Entry) error) error {
+func (l *raftLog) scan(lo, hi uint64, pageSize entryEncodingSize, v func([]*pb.Entry) error) error {
 	for lo < hi {
 		ents, err := l.slice(lo, hi, pageSize)
 		if err != nil {
@@ -508,7 +510,7 @@ func (l *raftLog) scan(lo, hi uint64, pageSize entryEncodingSize, v func([]pb.En
 }
 
 // slice returns a slice of log entries from lo through hi-1, inclusive.
-func (l *raftLog) slice(lo, hi uint64, maxSize entryEncodingSize) ([]pb.Entry, error) {
+func (l *raftLog) slice(lo, hi uint64, maxSize entryEncodingSize) ([]*pb.Entry, error) {
 	if err := l.mustCheckOutOfBounds(lo, hi); err != nil {
 		return nil, err
 	}

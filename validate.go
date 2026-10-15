@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"math"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/raftseg/raft/confchange"
 	pb "github.com/raftseg/raft/raftpb"
 	"github.com/raftseg/raft/tracker"
@@ -17,8 +19,8 @@ import (
 // RawNode.Step for messages from peers that fail it.
 var ErrInvalidMessage = errors.New("raft: invalid message")
 
-func invalid(m pb.Message, format string, args ...any) error {
-	return fmt.Errorf("%w: %s from %x to %x: %s", ErrInvalidMessage, m.Type, m.From, m.To, fmt.Sprintf(format, args...))
+func invalid(m *pb.Message, format string, args ...any) error {
+	return fmt.Errorf("%w: %s from %x to %x: %s", ErrInvalidMessage, m.GetType(), m.GetFrom(), m.GetTo(), fmt.Sprintf(format, args...))
 }
 
 // peerMessage reports the message types a peer may send over the network.
@@ -56,76 +58,89 @@ var peerMessage = [...]bool{
 // made the request. Fork addition; upstream accepted anything, and for
 // example panicked on a forwarded proposal whose configuration change did
 // not decode.
-func ValidateMessage(m pb.Message) error {
-	if int(m.Type) < 0 || int(m.Type) >= len(peerMessage) || !peerMessage[m.Type] {
+//
+// Entries must not carry fields this version does not know: protobuf keeps
+// them, so they would be stored and replicated with the log without being
+// counted in its size limits.
+func ValidateMessage(m *pb.Message) error {
+	if m == nil {
+		return fmt.Errorf("%w: nil message", ErrInvalidMessage)
+	}
+	if t := m.GetType(); int(t) < 0 || int(t) >= len(peerMessage) || !peerMessage[t] {
 		return invalid(m, "not a message type peers exchange")
 	}
-	if m.From == None || m.To == None || IsLocalMsgTarget(m.From) || IsLocalMsgTarget(m.To) {
+	if m.GetFrom() == None || m.GetTo() == None || IsLocalMsgTarget(m.GetFrom()) || IsLocalMsgTarget(m.GetTo()) {
 		return invalid(m, "reserved node ID")
 	}
-	switch m.Type {
+	switch m.GetType() {
 	case pb.MsgProp, pb.MsgReadIndex, pb.MsgTransferLeader:
 		// Followers forward these to the leader with the original sender,
 		// which can be the leader they reach.
 	default:
-		if m.From == m.To {
+		if m.GetFrom() == m.GetTo() {
 			return invalid(m, "sent to itself")
 		}
 	}
-	if len(m.Responses) > 0 {
+	if len(m.GetResponses()) > 0 {
 		return invalid(m, "carries local responses")
 	}
-	if m.Snapshot != nil && m.Type != pb.MsgSnap {
+	if m.Snapshot != nil && m.GetType() != pb.MsgSnap {
 		return invalid(m, "unexpected snapshot")
 	}
-	switch m.Type {
+	switch m.GetType() {
 	case pb.MsgProp, pb.MsgReadIndex:
 		// Forwarded as local messages, without a term.
-		if m.Term != 0 {
-			return invalid(m, "term %d on a forwarded request", m.Term)
+		if m.GetTerm() != 0 {
+			return invalid(m, "term %d on a forwarded request", m.GetTerm())
 		}
 	default:
-		if m.Term == 0 {
+		if m.GetTerm() == 0 {
 			return invalid(m, "no term")
 		}
 	}
-	for i, e := range m.Entries {
-		if e.Type < pb.EntryNormal || e.Type > pb.EntryConfChangeV2 {
-			return invalid(m, "entry %d has type %d", i, e.Type)
+	for i, e := range m.GetEntries() {
+		if e == nil {
+			return invalid(m, "entry %d is nil", i)
+		}
+		if e.GetType() < pb.EntryNormal || e.GetType() > pb.EntryConfChangeV2 {
+			return invalid(m, "entry %d has type %d", i, e.GetType())
+		}
+		if len(e.ProtoReflect().GetUnknown()) > 0 {
+			return invalid(m, "entry %d has fields this version does not know", i)
 		}
 	}
-	switch m.Type {
+	switch m.GetType() {
 	case pb.MsgProp:
-		if len(m.Entries) == 0 {
+		if len(m.GetEntries()) == 0 {
 			return invalid(m, "no entries")
 		}
-		for i, e := range m.Entries {
-			if e.Term != 0 || e.Index != 0 {
-				return invalid(m, "proposed entry %d already has index %d term %d", i, e.Index, e.Term)
+		for i, e := range m.GetEntries() {
+			if e.GetTerm() != 0 || e.GetIndex() != 0 {
+				return invalid(m, "proposed entry %d already has index %d term %d", i, e.GetIndex(), e.GetTerm())
 			}
 			if err := checkConfChange(e); err != nil {
 				return invalid(m, "proposed entry %d: %v", i, err)
 			}
 		}
 	case pb.MsgApp:
-		if m.LogTerm > m.Term {
-			return invalid(m, "log term %d above term %d", m.LogTerm, m.Term)
+		if m.GetLogTerm() > m.GetTerm() {
+			return invalid(m, "log term %d above term %d", m.GetLogTerm(), m.GetTerm())
 		}
-		if m.Index == 0 && m.LogTerm != 0 {
-			return invalid(m, "term %d for index 0", m.LogTerm)
+		if m.GetIndex() == 0 && m.GetLogTerm() != 0 {
+			return invalid(m, "term %d for index 0", m.GetLogTerm())
 		}
-		if uint64(len(m.Entries)) > math.MaxUint64-m.Index {
+		if uint64(len(m.GetEntries())) > math.MaxUint64-m.GetIndex() {
 			return invalid(m, "entries overflow the index space")
 		}
-		prev := m.LogTerm
-		for i, e := range m.Entries {
-			if e.Index != m.Index+1+uint64(i) {
-				return invalid(m, "entry %d has index %d, want %d", i, e.Index, m.Index+1+uint64(i))
+		prev := m.GetLogTerm()
+		for i, e := range m.GetEntries() {
+			if e.GetIndex() != m.GetIndex()+1+uint64(i) {
+				return invalid(m, "entry %d has index %d, want %d", i, e.GetIndex(), m.GetIndex()+1+uint64(i))
 			}
-			if e.Term < prev || e.Term > m.Term {
-				return invalid(m, "entry %d has term %d, outside [%d, %d]", i, e.Term, prev, m.Term)
+			if e.GetTerm() < prev || e.GetTerm() > m.GetTerm() {
+				return invalid(m, "entry %d has term %d, outside [%d, %d]", i, e.GetTerm(), prev, m.GetTerm())
 			}
-			prev = e.Term
+			prev = e.GetTerm()
 			// A leader accepts only configuration changes raft can apply.
 			if err := checkConfChange(e); err != nil {
 				return invalid(m, "entry %d: %v", i, err)
@@ -135,22 +150,22 @@ func ValidateMessage(m pb.Message) error {
 		if m.Snapshot == nil {
 			return invalid(m, "no snapshot")
 		}
-		md := m.Snapshot.Metadata
-		if md.Index == 0 || md.Term == 0 || md.Term > m.Term {
-			return invalid(m, "snapshot at index %d term %d (message term %d)", md.Index, md.Term, m.Term)
+		md := m.GetSnapshot().GetMetadata()
+		if md.GetIndex() == 0 || md.GetTerm() == 0 || md.GetTerm() > m.GetTerm() {
+			return invalid(m, "snapshot at index %d term %d (message term %d)", md.GetIndex(), md.GetTerm(), m.GetTerm())
 		}
-		if err := checkConfState(md.ConfState); err != nil {
+		if err := checkConfState(md.GetConfState()); err != nil {
 			return invalid(m, "snapshot configuration: %v", err)
 		}
 	case pb.MsgReadIndex, pb.MsgReadIndexResp:
-		if len(m.Entries) != 1 {
-			return invalid(m, "%d entries, want the request context", len(m.Entries))
+		if len(m.GetEntries()) != 1 {
+			return invalid(m, "%d entries, want the request context", len(m.GetEntries()))
 		}
 	}
-	switch m.Type {
+	switch m.GetType() {
 	case pb.MsgProp, pb.MsgApp, pb.MsgReadIndex, pb.MsgReadIndexResp:
 	default:
-		if len(m.Entries) > 0 {
+		if len(m.GetEntries()) > 0 {
 			return invalid(m, "unexpected entries")
 		}
 	}
@@ -161,59 +176,63 @@ func ValidateMessage(m pb.Message) error {
 // Messages from the node itself or its storage threads are its own, and so
 // are those without a sender, which applications step for local requests:
 // a transport must set From to the authenticated sender.
-func isPeerMessage(self uint64, m pb.Message) bool {
-	return m.From != None && m.From != self && !IsLocalMsgTarget(m.From)
+func isPeerMessage(self uint64, m *pb.Message) bool {
+	from := m.GetFrom()
+	return from != None && from != self && !IsLocalMsgTarget(from)
 }
 
 // checkConfChange checks that a configuration change entry decodes into a
 // change raft knows how to apply.
-func checkConfChange(e pb.Entry) error {
-	switch e.Type {
+func checkConfChange(e *pb.Entry) error {
+	switch e.GetType() {
 	case pb.EntryConfChange:
 		var cc pb.ConfChange
-		if err := cc.Unmarshal(e.Data); err != nil {
+		if err := proto.Unmarshal(e.GetData(), &cc); err != nil {
 			return err
 		}
 		return checkConfChangeV2(cc.AsV2())
 	case pb.EntryConfChangeV2:
 		var cc pb.ConfChangeV2
-		if err := cc.Unmarshal(e.Data); err != nil {
+		if err := proto.Unmarshal(e.GetData(), &cc); err != nil {
 			return err
 		}
-		return checkConfChangeV2(cc)
+		return checkConfChangeV2(&cc)
 	}
 	return nil
 }
 
 // checkConfChangeV2 checks a change's enumerations, on which raft panics,
 // and its node IDs.
-func checkConfChangeV2(cc pb.ConfChangeV2) error {
-	if cc.Transition < pb.ConfChangeTransitionAuto || cc.Transition > pb.ConfChangeTransitionJointExplicit {
-		return fmt.Errorf("unknown transition %d", cc.Transition)
+func checkConfChangeV2(cc *pb.ConfChangeV2) error {
+	if t := cc.GetTransition(); t < pb.ConfChangeTransitionAuto || t > pb.ConfChangeTransitionJointExplicit {
+		return fmt.Errorf("unknown transition %d", t)
 	}
-	for _, c := range cc.Changes {
-		if c.Type < pb.ConfChangeAddNode || c.Type > pb.ConfChangeAddLearnerNode {
-			return fmt.Errorf("unknown change type %d", c.Type)
+	for _, c := range cc.GetChanges() {
+		if c == nil {
+			return errors.New("nil change")
+		}
+		if t := c.GetType(); t < pb.ConfChangeAddNode || t > pb.ConfChangeAddLearnerNode {
+			return fmt.Errorf("unknown change type %d", t)
 		}
 		// Node 0 marks a change the application decided not to apply,
 		// which raft skips; the storage threads' IDs are reserved.
-		if IsLocalMsgTarget(c.NodeID) {
-			return fmt.Errorf("reserved node ID %x", c.NodeID)
+		if IsLocalMsgTarget(c.GetNodeId()) {
+			return fmt.Errorf("reserved node ID %x", c.GetNodeId())
 		}
 	}
 	return nil
 }
 
 // checkConfState checks that cs is a configuration raft can switch to.
-func checkConfState(cs pb.ConfState) error {
-	for _, ids := range [][]uint64{cs.Voters, cs.Learners, cs.VotersOutgoing, cs.LearnersNext} {
+func checkConfState(cs *pb.ConfState) error {
+	for _, ids := range [][]uint64{cs.GetVoters(), cs.GetLearners(), cs.GetVotersOutgoing(), cs.GetLearnersNext()} {
 		for _, id := range ids {
 			if id == None || IsLocalMsgTarget(id) {
 				return fmt.Errorf("reserved node ID %x", id)
 			}
 		}
 	}
-	if len(cs.Voters) == 0 {
+	if len(cs.GetVoters()) == 0 {
 		return errors.New("no voters")
 	}
 	cfg, trk, err := confchange.Restore(confchange.Changer{Tracker: tracker.MakeProgressTracker(1, 0), LastIndex: 1}, cs)
@@ -234,9 +253,12 @@ func checkConfState(cs pb.ConfState) error {
 // in which validation at proposal time misses a conflict) can treat it as
 // a no-op instead: every node decides the same way, as they all hold the
 // same configuration at that index. Fork addition.
-func ValidateConfChange(cs pb.ConfState, cc pb.ConfChangeV2) error {
+func ValidateConfChange(cs *pb.ConfState, cc *pb.ConfChangeV2) error {
 	if err := checkConfChangeV2(cc); err != nil {
 		return err
+	}
+	if cs == nil {
+		cs = &pb.ConfState{} // as protobuf reads a missing message
 	}
 	cfg, trk, err := confchange.Restore(confchange.Changer{Tracker: tracker.MakeProgressTracker(1, 0), LastIndex: 1}, cs)
 	if err != nil {
@@ -248,9 +270,9 @@ func ValidateConfChange(cs pb.ConfState, cc pb.ConfChangeV2) error {
 	if cc.LeaveJoint() {
 		_, _, err = chg.LeaveJoint()
 	} else if auto, ok := cc.EnterJoint(); ok {
-		_, _, err = chg.EnterJoint(auto, cc.Changes...)
+		_, _, err = chg.EnterJoint(auto, cc.GetChanges()...)
 	} else {
-		_, _, err = chg.Simple(cc.Changes...)
+		_, _, err = chg.Simple(cc.GetChanges()...)
 	}
 	return err
 }

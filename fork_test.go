@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"testing"
 
+	"google.golang.org/protobuf/proto"
+
 	pb "github.com/raftseg/raft/raftpb"
 )
 
@@ -71,7 +73,7 @@ func TestApplyWithZeroSizeLimits(t *testing.T) {
 		if err := rn.Campaign(); err != nil {
 			t.Fatal(err)
 		}
-		var applied []pb.Entry
+		var applied []*pb.Entry
 		handle := func() {
 			for i := 0; i < 100 && rn.HasReady(); i++ {
 				rd := rn.Ready()
@@ -85,11 +87,11 @@ func TestApplyWithZeroSizeLimits(t *testing.T) {
 					continue
 				}
 				for _, m := range rd.Messages {
-					switch m.To {
+					switch m.GetTo() {
 					case LocalAppendThread:
 						s.Append(m.Entries)
-						if m.Term != 0 {
-							s.SetHardState(pb.HardState{Term: m.Term, Vote: m.Vote, Commit: m.Commit})
+						if m.GetTerm() != 0 {
+							s.SetHardState(&pb.HardState{Term: m.Term, Vote: m.Vote, Commit: m.Commit})
 						}
 					case LocalApplyThread:
 						applied = append(applied, m.Entries...)
@@ -137,16 +139,16 @@ func TestReadIndexAfterLeaderRemovedItself(t *testing.T) {
 		r.becomeLeader()
 		r.readMessages()
 		// n2 acknowledges the leader's empty entry, which commits it.
-		if err := r.Step(pb.Message{From: 2, To: 1, Term: r.Term, Type: pb.MsgAppResp, Index: r.raftLog.lastIndex()}); err != nil {
+		if err := r.Step(&pb.Message{From: new(uint64(2)), To: new(uint64(1)), Term: new(r.Term), Type: pb.MsgAppResp.Enum(), Index: new(r.raftLog.lastIndex())}); err != nil {
 			t.Fatal(err)
 		}
 		if !r.committedEntryInCurrentTerm() {
 			t.Fatal("leader's entry not committed")
 		}
-		r.applyConfChange(pb.ConfChange{Type: pb.ConfChangeRemoveNode, NodeID: 1}.AsV2())
+		r.applyConfChange((&pb.ConfChange{Type: pb.ConfChangeRemoveNode.Enum(), NodeId: new(uint64(1))}).AsV2())
 		r.readMessages()
 		ctx := []byte("ctx")
-		if err := r.Step(pb.Message{From: 1, To: 1, Type: pb.MsgReadIndex, Entries: []pb.Entry{{Data: ctx}}}); err != nil {
+		if err := r.Step(&pb.Message{From: new(uint64(1)), To: new(uint64(1)), Type: pb.MsgReadIndex.Enum(), Entries: []*pb.Entry{{Data: ctx}}}); err != nil {
 			t.Fatal(err)
 		}
 		if len(r.readStates) != 0 {
@@ -154,7 +156,7 @@ func TestReadIndexAfterLeaderRemovedItself(t *testing.T) {
 		}
 		var asked []byte
 		for _, m := range r.readMessages() {
-			if m.Type == pb.MsgHeartbeat && m.To == 2 && len(m.Context) > 0 {
+			if m.GetType() == pb.MsgHeartbeat && m.GetTo() == 2 && len(m.Context) > 0 {
 				asked = m.Context
 			}
 		}
@@ -162,7 +164,7 @@ func TestReadIndexAfterLeaderRemovedItself(t *testing.T) {
 			t.Fatalf("%v: no heartbeat carrying the read to n2", option)
 		}
 		// Once n2 confirms the leadership, the read is answered.
-		if err := r.Step(pb.Message{From: 2, To: 1, Term: r.Term, Type: pb.MsgHeartbeatResp, Context: asked}); err != nil {
+		if err := r.Step(&pb.Message{From: new(uint64(2)), To: new(uint64(1)), Term: new(r.Term), Type: pb.MsgHeartbeatResp.Enum(), Context: asked}); err != nil {
 			t.Fatal(err)
 		}
 		if len(r.readStates) != 1 || r.readStates[0].Index != r.raftLog.committed {
@@ -183,21 +185,21 @@ func TestMustSyncSnapshot(t *testing.T) {
 	}
 	// Learn term 1 from the leader first, so the snapshot changes only the
 	// commit index.
-	if err := rn.Step(pb.Message{From: 1, To: 2, Term: 1, Type: pb.MsgHeartbeat}); err != nil {
+	if err := rn.Step(&pb.Message{From: new(uint64(1)), To: new(uint64(2)), Term: new(uint64(1)), Type: pb.MsgHeartbeat.Enum()}); err != nil {
 		t.Fatal(err)
 	}
 	rd := rn.Ready()
 	s.SetHardState(rd.HardState)
 	rn.Advance(rd)
-	snap := pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 10, Term: 1, ConfState: pb.ConfState{Voters: []uint64{1, 2}}}}
-	if err := rn.Step(pb.Message{From: 1, To: 2, Term: 1, Type: pb.MsgSnap, Snapshot: &snap}); err != nil {
+	snap := &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(10)), Term: new(uint64(1)), ConfState: &pb.ConfState{Voters: []uint64{1, 2}}}}
+	if err := rn.Step(&pb.Message{From: new(uint64(1)), To: new(uint64(2)), Term: new(uint64(1)), Type: pb.MsgSnap.Enum(), Snapshot: snap}); err != nil {
 		t.Fatal(err)
 	}
 	rd = rn.Ready()
 	if IsEmptySnap(rd.Snapshot) {
 		t.Fatal("no snapshot in Ready")
 	}
-	if rd.HardState.Term != 1 || rd.HardState.Vote != 0 {
+	if rd.HardState.GetTerm() != 1 || rd.HardState.GetVote() != 0 {
 		t.Fatalf("hard state %v: test needs a commit-only change", rd.HardState)
 	}
 	if !rd.MustSync {
@@ -217,21 +219,21 @@ func TestSnapshotWaitsForApplying(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ents := []pb.Entry{{Term: 1, Index: 1}, {Term: 1, Index: 2}}
-	if err := rn.Step(pb.Message{From: 1, To: 2, Term: 1, Type: pb.MsgApp, Entries: ents, Commit: 2}); err != nil {
+	ents := []*pb.Entry{{Term: new(uint64(1)), Index: new(uint64(1))}, {Term: new(uint64(1)), Index: new(uint64(2))}}
+	if err := rn.Step(&pb.Message{From: new(uint64(1)), To: new(uint64(2)), Term: new(uint64(1)), Type: pb.MsgApp.Enum(), Entries: ents, Commit: new(uint64(2))}); err != nil {
 		t.Fatal(err)
 	}
 	// Persist, then hand the committed entries to the apply thread and
 	// leave them there.
-	var apply []pb.Message
+	var apply []*pb.Message
 	for i := 0; i < 10 && rn.HasReady(); i++ {
 		rd := rn.Ready()
 		for _, m := range rd.Messages {
-			switch m.To {
+			switch m.GetTo() {
 			case LocalAppendThread:
 				s.Append(m.Entries)
 				for _, r := range m.Responses {
-					if r.To == 2 {
+					if r.GetTo() == 2 {
 						if err := rn.Step(r); err != nil {
 							t.Fatal(err)
 						}
@@ -245,8 +247,8 @@ func TestSnapshotWaitsForApplying(t *testing.T) {
 	if len(apply) == 0 {
 		t.Fatal("nothing handed to the apply thread")
 	}
-	snap := pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 10, Term: 1, ConfState: pb.ConfState{Voters: []uint64{1, 2}}}}
-	msnap := pb.Message{From: 1, To: 2, Term: 1, Type: pb.MsgSnap, Snapshot: &snap}
+	snap := &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(10)), Term: new(uint64(1)), ConfState: &pb.ConfState{Voters: []uint64{1, 2}}}}
+	msnap := &pb.Message{From: new(uint64(1)), To: new(uint64(2)), Term: new(uint64(1)), Type: pb.MsgSnap.Enum(), Snapshot: snap}
 	if err := rn.Step(msnap); err != nil {
 		t.Fatal(err)
 	}
@@ -280,11 +282,11 @@ func TestAnswersStaleLeader(t *testing.T) {
 	} {
 		r := newTestRaft(2, 10, 1, s)
 		r.becomeFollower(5, None)
-		if err := r.Step(pb.Message{From: 1, To: 2, Term: 3, Type: pb.MsgApp}); err != nil {
+		if err := r.Step(&pb.Message{From: new(uint64(1)), To: new(uint64(2)), Term: new(uint64(3)), Type: pb.MsgApp.Enum()}); err != nil {
 			t.Fatal(err)
 		}
 		msgs := r.readMessages()
-		if len(msgs) != 1 || msgs[0].Type != pb.MsgAppResp || msgs[0].Term != 5 || msgs[0].To != 1 {
+		if len(msgs) != 1 || msgs[0].GetType() != pb.MsgAppResp || msgs[0].GetTerm() != 5 || msgs[0].GetTo() != 1 {
 			t.Fatalf("got %v, want a MsgAppResp at term 5", msgs)
 		}
 	}
@@ -298,23 +300,23 @@ func TestAnswersStaleLeader(t *testing.T) {
 func TestDemotedLeaderHandsOff(t *testing.T) {
 	nt := newNetworkWithConfig(func(c *Config) { c.StepDownOnRemoval = true }, nil, nil)
 	n1, n2 := nt.peers[1].(*raft), nt.peers[2].(*raft)
-	nt.send(pb.Message{From: 1, To: 1, Type: pb.MsgHup})
+	nt.send(&pb.Message{From: new(uint64(1)), To: new(uint64(1)), Type: pb.MsgHup.Enum()})
 	if n1.state != StateLeader {
 		t.Fatal("n1 not leader")
 	}
-	cc := pb.ConfChange{Type: pb.ConfChangeAddLearnerNode, NodeID: 1}
-	data, err := cc.Marshal()
+	cc := &pb.ConfChange{Type: pb.ConfChangeAddLearnerNode.Enum(), NodeId: new(uint64(1))}
+	data, err := proto.Marshal(cc)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ccIndex := n1.raftLog.lastIndex() + 1
 	// n2 receives the demotion, but no message telling it that it
 	// committed, and not the entry after it.
-	nt.msgHook = func(m pb.Message) bool {
-		return !(m.From == 1 && m.To == 2 && (m.Commit >= ccIndex || m.Index >= ccIndex))
+	nt.msgHook = func(m *pb.Message) bool {
+		return !(m.GetFrom() == 1 && m.GetTo() == 2 && (m.GetCommit() >= ccIndex || m.GetIndex() >= ccIndex))
 	}
-	nt.send(pb.Message{From: 1, To: 1, Type: pb.MsgProp, Entries: []pb.Entry{{Type: pb.EntryConfChange, Data: data}}})
-	nt.send(pb.Message{From: 1, To: 1, Type: pb.MsgProp, Entries: []pb.Entry{{Data: []byte("x")}}})
+	nt.send(&pb.Message{From: new(uint64(1)), To: new(uint64(1)), Type: pb.MsgProp.Enum(), Entries: []*pb.Entry{{Type: pb.EntryConfChange.Enum(), Data: data}}})
+	nt.send(&pb.Message{From: new(uint64(1)), To: new(uint64(1)), Type: pb.MsgProp.Enum(), Entries: []*pb.Entry{{Data: []byte("x")}}})
 	if n1.raftLog.committed < ccIndex || n2.raftLog.committed >= ccIndex || n2.raftLog.lastIndex() != ccIndex {
 		t.Fatalf("setup: n1 commit %d, n2 commit %d last %d", n1.raftLog.committed, n2.raftLog.committed, n2.raftLog.lastIndex())
 	}
@@ -323,16 +325,16 @@ func TestDemotedLeaderHandsOff(t *testing.T) {
 	apply := func(r *raft) {
 		ents := nextEntsApplied(r, nt.storage[r.id])
 		for _, e := range ents {
-			if e.Type == pb.EntryConfChange {
-				var cc pb.ConfChange
-				if err := cc.Unmarshal(e.Data); err != nil {
+			if e.GetType() == pb.EntryConfChange {
+				cc := &pb.ConfChange{}
+				if err := proto.Unmarshal(e.Data, cc); err != nil {
 					t.Fatal(err)
 				}
 				r.applyConfChange(cc.AsV2())
 			}
 		}
 		if len(ents) > 0 {
-			r.appliedTo(ents[len(ents)-1].Index, 0)
+			r.appliedTo(ents[len(ents)-1].GetIndex(), 0)
 		}
 		nt.send(r.readMessages()...)
 	}
@@ -375,10 +377,10 @@ func TestDemotedLeaderHandsOff(t *testing.T) {
 // at index 2. Found by internal/raftsim.
 func TestSingleVoterReadAfterRestart(t *testing.T) {
 	s := newTestMemoryStorage(withPeers(1))
-	if err := s.Append([]pb.Entry{{Term: 1, Index: 1}, {Term: 1, Index: 2}, {Term: 1, Index: 3, Data: []byte("x")}}); err != nil {
+	if err := s.Append([]*pb.Entry{{Term: new(uint64(1)), Index: new(uint64(1))}, {Term: new(uint64(1)), Index: new(uint64(2))}, {Term: new(uint64(1)), Index: new(uint64(3)), Data: []byte("x")}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetHardState(pb.HardState{Term: 1, Vote: 1, Commit: 2}); err != nil {
+	if err := s.SetHardState(&pb.HardState{Term: new(uint64(1)), Vote: new(uint64(1)), Commit: new(uint64(2))}); err != nil {
 		t.Fatal(err)
 	}
 	rn := newTestRawNode(1, 10, 1, s)
@@ -398,8 +400,8 @@ func TestSingleVoterReadAfterRestart(t *testing.T) {
 	for i := 0; i < 10 && rn.BasicStatus().RaftState != StateLeader; i++ {
 		handleOne()
 	}
-	if st := rn.BasicStatus(); st.RaftState != StateLeader || st.Commit != 2 {
-		t.Fatalf("setup: %s with commit %d, want a leader with commit 2", st.RaftState, st.Commit)
+	if st := rn.BasicStatus(); st.RaftState != StateLeader || st.GetCommit() != 2 {
+		t.Fatalf("setup: %s with commit %d, want a leader with commit 2", st.RaftState, st.GetCommit())
 	}
 	// Ask before the new leader commits its first entry, then after.
 	rn.ReadIndex([]byte("early"))
@@ -429,16 +431,16 @@ func TestNoLeaseReadAfterTimeoutNow(t *testing.T) {
 		c.CheckQuorum = true
 		c.ReadOnlyOption = ReadOnlyLeaseBased
 	}, nil, nil, nil)
-	nt.send(pb.Message{From: 1, To: 1, Type: pb.MsgHup})
+	nt.send(&pb.Message{From: new(uint64(1)), To: new(uint64(1)), Type: pb.MsgHup.Enum()})
 	n1 := nt.peers[1].(*raft)
 	if n1.state != StateLeader || !n1.committedEntryInCurrentTerm() {
 		t.Fatal("n1 not an established leader")
 	}
 	// A heartbeat round acknowledged by a quorum establishes the lease.
-	nt.send(pb.Message{From: 1, To: 1, Type: pb.MsgBeat})
+	nt.send(&pb.Message{From: new(uint64(1)), To: new(uint64(1)), Type: pb.MsgBeat.Enum()})
 	read := func() []ReadState {
 		n1.readStates = nil
-		if err := n1.Step(pb.Message{From: 1, To: 1, Type: pb.MsgReadIndex, Entries: []pb.Entry{{Data: []byte("ctx")}}}); err != nil {
+		if err := n1.Step(&pb.Message{From: new(uint64(1)), To: new(uint64(1)), Type: pb.MsgReadIndex.Enum(), Entries: []*pb.Entry{{Data: []byte("ctx")}}}); err != nil {
 			t.Fatal(err)
 		}
 		n1.readMessages()
@@ -449,7 +451,7 @@ func TestNoLeaseReadAfterTimeoutNow(t *testing.T) {
 	}
 	// The transfer starts; the MsgTimeoutNow is in flight.
 	nt.ignore(pb.MsgTimeoutNow)
-	nt.send(pb.Message{From: 2, To: 1, Type: pb.MsgTransferLeader})
+	nt.send(&pb.Message{From: new(uint64(2)), To: new(uint64(1)), Type: pb.MsgTransferLeader.Enum()})
 	if n1.state != StateLeader || n1.leadTransferee != 2 {
 		t.Fatal("transfer not started")
 	}
@@ -483,12 +485,12 @@ func TestLeaseNeedsRecentRound(t *testing.T) {
 		c.CheckQuorum = true
 		c.ReadOnlyOption = ReadOnlyLeaseBased
 	}, nil, nil, nil)
-	nt.send(pb.Message{From: 1, To: 1, Type: pb.MsgHup})
+	nt.send(&pb.Message{From: new(uint64(1)), To: new(uint64(1)), Type: pb.MsgHup.Enum()})
 	n1 := nt.peers[1].(*raft)
 	if n1.leaseValid() {
 		t.Fatal("lease before any heartbeat round")
 	}
-	nt.send(pb.Message{From: 1, To: 1, Type: pb.MsgBeat})
+	nt.send(&pb.Message{From: new(uint64(1)), To: new(uint64(1)), Type: pb.MsgBeat.Enum()})
 	if !n1.leaseValid() {
 		t.Fatal("no lease after a round acknowledged by all")
 	}
@@ -507,7 +509,7 @@ func TestLeaseNeedsRecentRound(t *testing.T) {
 	}
 	// A read now goes through a quorum, which cannot answer.
 	n1.readStates = nil
-	if err := n1.Step(pb.Message{From: 1, To: 1, Type: pb.MsgReadIndex, Entries: []pb.Entry{{Data: []byte("ctx")}}}); err != nil {
+	if err := n1.Step(&pb.Message{From: new(uint64(1)), To: new(uint64(1)), Type: pb.MsgReadIndex.Enum(), Entries: []*pb.Entry{{Data: []byte("ctx")}}}); err != nil {
 		t.Fatal(err)
 	}
 	nt.send(n1.readMessages()...)
@@ -521,7 +523,7 @@ func TestLeaseNeedsRecentRound(t *testing.T) {
 	if n1.leaseValid() {
 		t.Fatal("old round renewed the lease")
 	}
-	nt.send(pb.Message{From: 1, To: 1, Type: pb.MsgBeat})
+	nt.send(&pb.Message{From: new(uint64(1)), To: new(uint64(1)), Type: pb.MsgBeat.Enum()})
 	if !n1.leaseValid() {
 		t.Fatal("fresh round did not renew the lease")
 	}
@@ -534,19 +536,19 @@ func TestLeaseStartGuard(t *testing.T) {
 	for _, term := range []uint64{0, 3} {
 		s := newTestMemoryStorage(withPeers(1, 2, 3))
 		if term > 0 {
-			s.SetHardState(pb.HardState{Term: term})
+			s.SetHardState(&pb.HardState{Term: new(term)})
 		}
 		cfg := newTestConfig(2, 10, 1, s)
 		cfg.CheckQuorum = true
 		cfg.ReadOnlyOption = ReadOnlyLeaseBased
 		r := newRaft(cfg)
-		vote := pb.Message{From: 3, To: 2, Term: term + 1, Type: pb.MsgVote}
+		vote := &pb.Message{From: new(uint64(3)), To: new(uint64(2)), Term: new(term + 1), Type: pb.MsgVote.Enum()}
 		if err := r.Step(vote); err != nil {
 			t.Fatal(err)
 		}
 		granted := false
 		for _, m := range r.readMessages() {
-			granted = granted || (m.Type == pb.MsgVoteResp && !m.Reject)
+			granted = granted || (m.GetType() == pb.MsgVoteResp && !m.GetReject())
 		}
 		if term == 0 && !granted {
 			t.Fatal("fresh node refused a vote")
@@ -563,13 +565,13 @@ func TestLeaseStartGuard(t *testing.T) {
 				// It may campaign itself; what matters is that it would vote.
 				r.becomeFollower(r.Term, None)
 			}
-			vote.Term = r.Term + 1
+			vote.Term = new(r.Term + 1)
 			if err := r.Step(vote); err != nil {
 				t.Fatal(err)
 			}
 			granted = false
 			for _, m := range r.readMessages() {
-				granted = granted || (m.Type == pb.MsgVoteResp && !m.Reject)
+				granted = granted || (m.GetType() == pb.MsgVoteResp && !m.GetReject())
 			}
 			if !granted {
 				t.Fatal("restarted node still refuses votes after an election timeout")
@@ -584,9 +586,9 @@ type forkNet struct {
 	t       *testing.T
 	peers   map[uint64]*raft
 	storage map[uint64]*MemoryStorage
-	queue   []pb.Message
+	queue   []*pb.Message
 	// transform may rewrite or drop (false) a message before delivery.
-	transform func(pb.Message) (pb.Message, bool)
+	transform func(*pb.Message) (*pb.Message, bool)
 }
 
 func newForkNet(t *testing.T, ids ...uint64) *forkNet {
@@ -618,7 +620,7 @@ func (n *forkNet) settle() {
 				continue
 			}
 		}
-		if p := n.peers[m.To]; p != nil {
+		if p := n.peers[m.GetTo()]; p != nil {
 			_ = p.Step(m)
 		}
 	}
@@ -629,16 +631,16 @@ func (n *forkNet) apply(id uint64) {
 	r := n.peers[id]
 	for _, e := range nextEnts(r, n.storage[id]) {
 		var cc pb.ConfChangeI
-		switch e.Type {
+		switch e.GetType() {
 		case pb.EntryConfChange:
-			var c pb.ConfChange
-			if err := c.Unmarshal(e.Data); err != nil {
+			c := &pb.ConfChange{}
+			if err := proto.Unmarshal(e.Data, c); err != nil {
 				n.t.Fatal(err)
 			}
 			cc = c
 		case pb.EntryConfChangeV2:
-			var c pb.ConfChangeV2
-			if err := c.Unmarshal(e.Data); err != nil {
+			c := &pb.ConfChangeV2{}
+			if err := proto.Unmarshal(e.Data, c); err != nil {
 				n.t.Fatal(err)
 			}
 			cc = c
@@ -680,7 +682,7 @@ func sortedIDs(m map[uint64]*raft) []uint64 {
 // needs n1's vote. Found by internal/raftsim.
 func TestStaleConfigurationCannotElect(t *testing.T) {
 	n := newForkNet(t, 1, 2, 3, 4)
-	_ = n.peers[4].Step(pb.Message{From: 4, To: 4, Type: pb.MsgHup})
+	_ = n.peers[4].Step(&pb.Message{From: new(uint64(4)), To: new(uint64(4)), Type: pb.MsgHup.Enum()})
 	n.queue = append(n.queue, n.peers[4].readMessages()...)
 	n.settle()
 	if n.peers[4].state != StateLeader {
@@ -689,27 +691,28 @@ func TestStaleConfigurationCannotElect(t *testing.T) {
 	k1 := n.peers[4].raftLog.lastIndex() + 1
 	// n2 gets every entry, but never learns a commit index at or past the
 	// first configuration change.
-	n.transform = func(m pb.Message) (pb.Message, bool) {
-		if m.To == 2 && (m.Type == pb.MsgApp || m.Type == pb.MsgHeartbeat) && m.Commit >= k1 {
-			m.Commit = k1 - 1
+	n.transform = func(m *pb.Message) (*pb.Message, bool) {
+		if m.GetTo() == 2 && (m.GetType() == pb.MsgApp || m.GetType() == pb.MsgHeartbeat) && m.GetCommit() >= k1 {
+			m = proto.Clone(m).(*pb.Message) // the sender may still hold m
+			m.Commit = new(k1 - 1)
 		}
 		return m, true
 	}
-	propose := func(cc pb.ConfChangeV2) {
-		data, err := cc.Marshal()
+	propose := func(cc *pb.ConfChangeV2) {
+		data, err := proto.Marshal(cc)
 		if err != nil {
 			t.Fatal(err)
 		}
-		_ = n.peers[4].Step(pb.Message{From: 4, To: 4, Type: pb.MsgProp, Entries: []pb.Entry{{Type: pb.EntryConfChangeV2, Data: data}}})
+		_ = n.peers[4].Step(&pb.Message{From: new(uint64(4)), To: new(uint64(4)), Type: pb.MsgProp.Enum(), Entries: []*pb.Entry{{Type: pb.EntryConfChangeV2.Enum(), Data: data}}})
 		n.queue = append(n.queue, n.peers[4].readMessages()...)
 		n.settle()
 	}
-	propose(pb.ConfChangeV2{Transition: pb.ConfChangeTransitionJointExplicit, Changes: []pb.ConfChangeSingle{
-		{Type: pb.ConfChangeRemoveNode, NodeID: 2},
-		{Type: pb.ConfChangeRemoveNode, NodeID: 3},
-		{Type: pb.ConfChangeRemoveNode, NodeID: 4},
+	propose(&pb.ConfChangeV2{Transition: pb.ConfChangeTransitionJointExplicit.Enum(), Changes: []*pb.ConfChangeSingle{
+		{Type: pb.ConfChangeRemoveNode.Enum(), NodeId: new(uint64(2))},
+		{Type: pb.ConfChangeRemoveNode.Enum(), NodeId: new(uint64(3))},
+		{Type: pb.ConfChangeRemoveNode.Enum(), NodeId: new(uint64(4))},
 	}})
-	propose(pb.ConfChangeV2{}) // leave the joint configuration
+	propose(&pb.ConfChangeV2{}) // leave the joint configuration
 	// n1 now has the configuration (1); n4 has handed leadership to it.
 	for i := 0; i < 50 && n.peers[1].state != StateLeader; i++ {
 		for _, id := range []uint64{1, 3, 4} {
@@ -725,12 +728,12 @@ func TestStaleConfigurationCannotElect(t *testing.T) {
 		t.Fatalf("setup: n2 holds up to %d, want both changes (%d, %d)", n2.raftLog.lastIndex(), k1, k1+1)
 	}
 	// n1 commits an entry of its own, alone.
-	_ = n1.Step(pb.Message{From: 1, To: 1, Type: pb.MsgProp, Entries: []pb.Entry{{Data: []byte("by n1")}}})
+	_ = n1.Step(&pb.Message{From: new(uint64(1)), To: new(uint64(1)), Type: pb.MsgProp.Enum(), Entries: []*pb.Entry{{Data: []byte("by n1")}}})
 	n.queue = append(n.queue, n1.readMessages()...)
 	n.settle()
 	committedByN1 := n1.raftLog.committed
 	// Cut n1 off; the others try to elect someone.
-	n.transform = func(m pb.Message) (pb.Message, bool) { return m, m.To != 1 && m.From != 1 }
+	n.transform = func(m *pb.Message) (*pb.Message, bool) { return m, m.GetTo() != 1 && m.GetFrom() != 1 }
 	for i := 0; i < 300; i++ {
 		for _, id := range []uint64{2, 3, 4} {
 			n.tick(id)
@@ -757,7 +760,7 @@ func TestStaleConfigurationCannotElect(t *testing.T) {
 // internal/raftsim.
 func TestRemovedLeaderRescues(t *testing.T) {
 	n := newForkNet(t, 1, 2)
-	_ = n.peers[1].Step(pb.Message{From: 1, To: 1, Type: pb.MsgHup})
+	_ = n.peers[1].Step(&pb.Message{From: new(uint64(1)), To: new(uint64(1)), Type: pb.MsgHup.Enum()})
 	n.queue = append(n.queue, n.peers[1].readMessages()...)
 	n.settle()
 	n1, n2 := n.peers[1], n.peers[2]
@@ -766,35 +769,36 @@ func TestRemovedLeaderRescues(t *testing.T) {
 	}
 	k1 := n1.raftLog.lastIndex() + 1
 	var hold uint64 // entries from this index on are kept from n2
-	n.transform = func(m pb.Message) (pb.Message, bool) {
-		if m.To == 2 && (m.Type == pb.MsgApp || m.Type == pb.MsgHeartbeat) {
-			if hold != 0 && len(m.Entries) > 0 && m.Entries[len(m.Entries)-1].Index >= hold {
+	n.transform = func(m *pb.Message) (*pb.Message, bool) {
+		if m.GetTo() == 2 && (m.GetType() == pb.MsgApp || m.GetType() == pb.MsgHeartbeat) {
+			if hold != 0 && len(m.Entries) > 0 && m.Entries[len(m.Entries)-1].GetIndex() >= hold {
 				return m, false
 			}
-			m.Commit = min(m.Commit, k1-1)
+			m = proto.Clone(m).(*pb.Message) // the sender may still hold m
+			m.Commit = new(min(m.GetCommit(), k1-1))
 		}
 		return m, true
 	}
-	propose := func(e pb.Entry) {
-		_ = n1.Step(pb.Message{From: 1, To: 1, Type: pb.MsgProp, Entries: []pb.Entry{e}})
+	propose := func(e *pb.Entry) {
+		_ = n1.Step(&pb.Message{From: new(uint64(1)), To: new(uint64(1)), Type: pb.MsgProp.Enum(), Entries: []*pb.Entry{e}})
 		n.queue = append(n.queue, n1.readMessages()...)
 	}
-	data := func(cc pb.ConfChangeV2) []byte {
-		b, err := cc.Marshal()
+	data := func(cc *pb.ConfChangeV2) []byte {
+		b, err := proto.Marshal(cc)
 		if err != nil {
 			t.Fatal(err)
 		}
 		return b
 	}
-	propose(pb.Entry{Type: pb.EntryConfChangeV2, Data: data(pb.ConfChangeV2{
-		Transition: pb.ConfChangeTransitionJointExplicit,
-		Changes:    []pb.ConfChangeSingle{{Type: pb.ConfChangeRemoveNode, NodeID: 1}},
+	propose(&pb.Entry{Type: pb.EntryConfChangeV2.Enum(), Data: data(&pb.ConfChangeV2{
+		Transition: pb.ConfChangeTransitionJointExplicit.Enum(),
+		Changes:    []*pb.ConfChangeSingle{{Type: pb.ConfChangeRemoveNode.Enum(), NodeId: new(uint64(1))}},
 	})})
 	n.settle()
 	// The leave entry reaches n2; an entry proposed right after it does not.
-	propose(pb.Entry{Type: pb.EntryConfChangeV2, Data: data(pb.ConfChangeV2{})})
+	propose(&pb.Entry{Type: pb.EntryConfChangeV2.Enum(), Data: data(&pb.ConfChangeV2{})})
 	hold = n1.raftLog.lastIndex() + 1
-	propose(pb.Entry{Data: []byte("x")})
+	propose(&pb.Entry{Data: []byte("x")})
 	n.settle()
 	if n1.trk.Progress[1] != nil {
 		t.Fatalf("setup: n1 not removed: %s", n1.trk.Config)
@@ -832,18 +836,18 @@ func TestRemovedLeaderRescues(t *testing.T) {
 // pass validation. Found by internal/raftsim.
 func TestVoteFromNodeThatLostItsTerm(t *testing.T) {
 	s := newTestMemoryStorage(withPeers(1, 2, 3))
-	if err := s.Append([]pb.Entry{{Index: 1, Term: 2}, {Index: 2, Term: 4}}); err != nil {
+	if err := s.Append([]*pb.Entry{{Index: new(uint64(1)), Term: new(uint64(2))}, {Index: new(uint64(2)), Term: new(uint64(4))}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetHardState(pb.HardState{Term: 2, Vote: 3, Commit: 1}); err != nil {
+	if err := s.SetHardState(&pb.HardState{Term: new(uint64(2)), Vote: new(uint64(3)), Commit: new(uint64(1))}); err != nil {
 		t.Fatal(err)
 	}
 	r := newTestRaft(1, 10, 1, s)
 	r.campaign(campaignElection)
 	for _, m := range r.readMessages() {
-		if m.Type == pb.MsgVote {
-			if m.LogTerm <= m.Term {
-				t.Fatalf("setup: vote at term %d for log term %d", m.Term, m.LogTerm)
+		if m.GetType() == pb.MsgVote {
+			if m.GetLogTerm() <= m.GetTerm() {
+				t.Fatalf("setup: vote at term %d for log term %d", m.GetTerm(), m.GetLogTerm())
 			}
 			if err := ValidateMessage(m); err != nil {
 				t.Fatalf("vote request rejected: %v", err)
@@ -857,24 +861,24 @@ func TestVoteFromNodeThatLostItsTerm(t *testing.T) {
 func TestForwardTransferWithTerm(t *testing.T) {
 	r := newTestRaft(1, 10, 1, newTestMemoryStorage(withPeers(1, 2, 3)))
 	r.becomeFollower(3, 3)
-	if err := r.Step(pb.Message{From: 2, To: 1, Term: 3, Type: pb.MsgTransferLeader}); err != nil {
+	if err := r.Step(&pb.Message{From: new(uint64(2)), To: new(uint64(1)), Term: new(uint64(3)), Type: pb.MsgTransferLeader.Enum()}); err != nil {
 		t.Fatal(err)
 	}
 	msgs := r.readMessages()
-	if len(msgs) != 1 || msgs[0].Type != pb.MsgTransferLeader || msgs[0].To != 3 || msgs[0].From != 2 || msgs[0].Term != 3 {
+	if len(msgs) != 1 || msgs[0].GetType() != pb.MsgTransferLeader || msgs[0].GetTo() != 3 || msgs[0].GetFrom() != 2 || msgs[0].GetTerm() != 3 {
 		t.Fatalf("got %v, want the request forwarded to n3", msgs)
 	}
 }
 
 // nextEntsApplied is nextEnts, but reports the application to raft as
 // RawNode does, so that what raft does on application happens.
-func nextEntsApplied(r *raft, s *MemoryStorage) []pb.Entry {
+func nextEntsApplied(r *raft, s *MemoryStorage) []*pb.Entry {
 	s.Append(r.raftLog.nextUnstableEnts())
 	r.raftLog.stableTo(r.raftLog.lastEntryID())
 	r.advanceMessagesAfterAppend()
 	ents := r.raftLog.nextCommittedEnts(true)
 	if len(ents) > 0 {
-		r.raftLog.acceptApplying(ents[len(ents)-1].Index, 0, true)
+		r.raftLog.acceptApplying(ents[len(ents)-1].GetIndex(), 0, true)
 	}
 	return ents
 }
@@ -887,7 +891,7 @@ func nextEntsApplied(r *raft, s *MemoryStorage) []pb.Entry {
 // internal/raftsim (seed 14664, once retried reads changed its schedules).
 func TestPreVoteRejectedWithoutTerm(t *testing.T) {
 	s := newTestMemoryStorage(withPeers(1, 2, 3))
-	if err := s.Append([]pb.Entry{{Term: 1, Index: 1}, {Term: 1, Index: 2}, {Term: 1, Index: 3}}); err != nil {
+	if err := s.Append([]*pb.Entry{{Term: new(uint64(1)), Index: new(uint64(1))}, {Term: new(uint64(1)), Index: new(uint64(2))}, {Term: new(uint64(1)), Index: new(uint64(3))}}); err != nil {
 		t.Fatal(err)
 	}
 	cfg := newTestConfig(1, 10, 1, s)
@@ -897,18 +901,18 @@ func TestPreVoteRejectedWithoutTerm(t *testing.T) {
 		t.Fatalf("term %d", r.Term)
 	}
 	// A candidate with a shorter log is rejected, without an answer.
-	if err := r.Step(pb.Message{From: 2, To: 1, Term: 2, Type: pb.MsgPreVote, LogTerm: 1, Index: 2}); err != nil {
+	if err := r.Step(&pb.Message{From: new(uint64(2)), To: new(uint64(1)), Term: new(uint64(2)), Type: pb.MsgPreVote.Enum(), LogTerm: new(uint64(1)), Index: new(uint64(2))}); err != nil {
 		t.Fatal(err)
 	}
 	if msgs := r.readMessages(); len(msgs) != 0 {
 		t.Fatalf("answered %v", msgs)
 	}
 	// One whose log is at least as up to date gets the pre-vote.
-	if err := r.Step(pb.Message{From: 3, To: 1, Term: 2, Type: pb.MsgPreVote, LogTerm: 1, Index: 3}); err != nil {
+	if err := r.Step(&pb.Message{From: new(uint64(3)), To: new(uint64(1)), Term: new(uint64(2)), Type: pb.MsgPreVote.Enum(), LogTerm: new(uint64(1)), Index: new(uint64(3))}); err != nil {
 		t.Fatal(err)
 	}
 	msgs := r.readMessages()
-	if len(msgs) != 1 || msgs[0].Type != pb.MsgPreVoteResp || msgs[0].Reject || msgs[0].Term != 2 {
+	if len(msgs) != 1 || msgs[0].GetType() != pb.MsgPreVoteResp || msgs[0].GetReject() || msgs[0].GetTerm() != 2 {
 		t.Fatalf("got %v", msgs)
 	}
 }
@@ -931,11 +935,11 @@ func TestCandidateLearnsHigherTerm(t *testing.T) {
 	n1 := newNode(1)
 	n1.becomeFollower(4, None)
 	n1.becomeCandidate() // term 5
-	if err := n6.Step(pb.Message{From: 1, To: 6, Term: n1.Term, Type: pb.MsgVote}); err != nil {
+	if err := n6.Step(&pb.Message{From: new(uint64(1)), To: new(uint64(6)), Term: new(n1.Term), Type: pb.MsgVote.Enum()}); err != nil {
 		t.Fatal(err)
 	}
 	msgs := n6.readMessages()
-	if len(msgs) != 1 || msgs[0].Type != pb.MsgVoteResp || !msgs[0].Reject || msgs[0].Term != 10 {
+	if len(msgs) != 1 || msgs[0].GetType() != pb.MsgVoteResp || !msgs[0].GetReject() || msgs[0].GetTerm() != 10 {
 		t.Fatalf("n6 answered %v", msgs)
 	}
 	if err := n1.Step(msgs[0]); err != nil {
@@ -946,16 +950,16 @@ func TestCandidateLearnsHigherTerm(t *testing.T) {
 	}
 	// Its next campaign wins n6's vote.
 	n1.becomeCandidate()
-	if err := n6.Step(pb.Message{From: 1, To: 6, Term: n1.Term, Type: pb.MsgVote}); err != nil {
+	if err := n6.Step(&pb.Message{From: new(uint64(1)), To: new(uint64(6)), Term: new(n1.Term), Type: pb.MsgVote.Enum()}); err != nil {
 		t.Fatal(err)
 	}
 	msgs = n6.readMessages()
-	if len(msgs) != 1 || msgs[0].Type != pb.MsgVoteResp || msgs[0].Reject {
+	if len(msgs) != 1 || msgs[0].GetType() != pb.MsgVoteResp || msgs[0].GetReject() {
 		t.Fatalf("n6 answered %v", msgs)
 	}
 	// A node that knows a leader ignores a vote request from a lower term.
 	n6.becomeFollower(20, 1)
-	if err := n6.Step(pb.Message{From: 9, To: 6, Term: 15, Type: pb.MsgVote}); err != nil {
+	if err := n6.Step(&pb.Message{From: new(uint64(9)), To: new(uint64(6)), Term: new(uint64(15)), Type: pb.MsgVote.Enum()}); err != nil {
 		t.Fatal(err)
 	}
 	if msgs := n6.readMessages(); len(msgs) != 0 {

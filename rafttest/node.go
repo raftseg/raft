@@ -39,7 +39,7 @@ type node struct {
 	storage *raft.MemoryStorage
 
 	mu    sync.Mutex // guards state
-	state raftpb.HardState
+	state *raftpb.HardState
 }
 
 func startNode(id uint64, peers []raft.Peer, iface iface) *node {
@@ -102,7 +102,7 @@ func (n *node) start() {
 				close(n.stopc)
 				return
 			case p := <-n.pausec:
-				recvms := make([]raftpb.Message, 0)
+				recvms := make([]*raftpb.Message, 0)
 				for p {
 					select {
 					case m := <-n.iface.recv():

@@ -28,7 +28,7 @@ import (
 
 func TestUnstableMaybeFirstIndex(t *testing.T) {
 	tests := []struct {
-		entries []pb.Entry
+		entries []*pb.Entry
 		offset  uint64
 		snap    *pb.Snapshot
 
@@ -41,16 +41,16 @@ func TestUnstableMaybeFirstIndex(t *testing.T) {
 			false, 0,
 		},
 		{
-			[]pb.Entry{}, 0, nil,
+			[]*pb.Entry{}, 0, nil,
 			false, 0,
 		},
 		// has snapshot
 		{
-			index(5).terms(1), 5, &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			index(5).terms(1), 5, &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			true, 5,
 		},
 		{
-			[]pb.Entry{}, 5, &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			[]*pb.Entry{}, 5, &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			true, 5,
 		},
 	}
@@ -72,7 +72,7 @@ func TestUnstableMaybeFirstIndex(t *testing.T) {
 
 func TestMaybeLastIndex(t *testing.T) {
 	tests := []struct {
-		entries []pb.Entry
+		entries []*pb.Entry
 		offset  uint64
 		snap    *pb.Snapshot
 
@@ -85,17 +85,17 @@ func TestMaybeLastIndex(t *testing.T) {
 			true, 5,
 		},
 		{
-			index(5).terms(1), 5, &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			index(5).terms(1), 5, &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			true, 5,
 		},
 		// last in snapshot
 		{
-			[]pb.Entry{}, 5, &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			[]*pb.Entry{}, 5, &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			true, 4,
 		},
 		// empty unstable
 		{
-			[]pb.Entry{}, 0, nil,
+			[]*pb.Entry{}, 0, nil,
 			false, 0,
 		},
 	}
@@ -117,7 +117,7 @@ func TestMaybeLastIndex(t *testing.T) {
 
 func TestUnstableMaybeTerm(t *testing.T) {
 	tests := []struct {
-		entries []pb.Entry
+		entries []*pb.Entry
 		offset  uint64
 		snap    *pb.Snapshot
 		index   uint64
@@ -142,38 +142,38 @@ func TestUnstableMaybeTerm(t *testing.T) {
 			false, 0,
 		},
 		{
-			index(5).terms(1), 5, &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			index(5).terms(1), 5, &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			5,
 			true, 1,
 		},
 		{
-			index(5).terms(1), 5, &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			index(5).terms(1), 5, &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			6,
 			false, 0,
 		},
 		// term from snapshot
 		{
-			index(5).terms(1), 5, &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			index(5).terms(1), 5, &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			4,
 			true, 1,
 		},
 		{
-			index(5).terms(1), 5, &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			index(5).terms(1), 5, &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			3,
 			false, 0,
 		},
 		{
-			[]pb.Entry{}, 5, &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			[]*pb.Entry{}, 5, &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			5,
 			false, 0,
 		},
 		{
-			[]pb.Entry{}, 5, &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			[]*pb.Entry{}, 5, &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			4,
 			true, 1,
 		},
 		{
-			[]pb.Entry{}, 0, nil,
+			[]*pb.Entry{}, 0, nil,
 			5,
 			false, 0,
 		},
@@ -199,27 +199,27 @@ func TestUnstableRestore(t *testing.T) {
 		entries:            index(5).terms(1),
 		offset:             5,
 		offsetInProgress:   6,
-		snapshot:           &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+		snapshot:           &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 		snapshotInProgress: true,
 		logger:             raftLogger,
 	}
-	s := pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 6, Term: 2}}
+	s := &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(6)), Term: new(uint64(2))}}
 	u.restore(s)
 
-	require.Equal(t, s.Metadata.Index+1, u.offset)
-	require.Equal(t, s.Metadata.Index+1, u.offsetInProgress)
+	require.Equal(t, s.GetMetadata().GetIndex()+1, u.offset)
+	require.Equal(t, s.GetMetadata().GetIndex()+1, u.offsetInProgress)
 	require.Zero(t, len(u.entries))
-	require.Equal(t, &s, u.snapshot)
+	require.Equal(t, s, u.snapshot)
 	require.False(t, u.snapshotInProgress)
 }
 
 func TestUnstableNextEntries(t *testing.T) {
 	tests := []struct {
-		entries          []pb.Entry
+		entries          []*pb.Entry
 		offset           uint64
 		offsetInProgress uint64
 
-		wentries []pb.Entry
+		wentries []*pb.Entry
 	}{
 		// nothing in progress
 		{
@@ -253,7 +253,7 @@ func TestUnstableNextEntries(t *testing.T) {
 }
 
 func TestUnstableNextSnapshot(t *testing.T) {
-	s := &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}}
+	s := &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}}
 	tests := []struct {
 		snapshot           *pb.Snapshot
 		snapshotInProgress bool
@@ -291,7 +291,7 @@ func TestUnstableNextSnapshot(t *testing.T) {
 
 func TestUnstableAcceptInProgress(t *testing.T) {
 	tests := []struct {
-		entries            []pb.Entry
+		entries            []*pb.Entry
 		snapshot           *pb.Snapshot
 		offsetInProgress   uint64
 		snapshotInProgress bool
@@ -300,7 +300,7 @@ func TestUnstableAcceptInProgress(t *testing.T) {
 		wsnapshotInProgress bool
 	}{
 		{
-			[]pb.Entry{}, nil,
+			[]*pb.Entry{}, nil,
 			5,     // no entries
 			false, // snapshot not already in progress
 			5, false,
@@ -331,61 +331,61 @@ func TestUnstableAcceptInProgress(t *testing.T) {
 		},
 		// with snapshot
 		{
-			[]pb.Entry{}, &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			[]*pb.Entry{}, &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			5,     // no entries
 			false, // snapshot not already in progress
 			5, true,
 		},
 		{
-			index(5).terms(1), &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			index(5).terms(1), &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			5,     // entries not in progress
 			false, // snapshot not already in progress
 			6, true,
 		},
 		{
-			index(5).terms(1, 1), &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			index(5).terms(1, 1), &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			5,     // entries not in progress
 			false, // snapshot not already in progress
 			7, true,
 		},
 		{
-			index(5).terms(1, 1), &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			index(5).terms(1, 1), &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			6,     // in-progress to the first entry
 			false, // snapshot not already in progress
 			7, true,
 		},
 		{
-			index(5).terms(1, 1), &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			index(5).terms(1, 1), &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			7,     // in-progress to the second entry
 			false, // snapshot not already in progress
 			7, true,
 		},
 		{
-			[]pb.Entry{}, &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			[]*pb.Entry{}, &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			5,    // entries not in progress
 			true, // snapshot already in progress
 			5, true,
 		},
 		{
-			index(5).terms(1), &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			index(5).terms(1), &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			5,    // entries not in progress
 			true, // snapshot already in progress
 			6, true,
 		},
 		{
-			index(5).terms(1, 1), &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			index(5).terms(1, 1), &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			5,    // entries not in progress
 			true, // snapshot already in progress
 			7, true,
 		},
 		{
-			index(5).terms(1, 1), &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			index(5).terms(1, 1), &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			6,    // in-progress to the first entry
 			true, // snapshot already in progress
 			7, true,
 		},
 		{
-			index(5).terms(1, 1), &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			index(5).terms(1, 1), &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			7,    // in-progress to the second entry
 			true, // snapshot already in progress
 			7, true,
@@ -409,7 +409,7 @@ func TestUnstableAcceptInProgress(t *testing.T) {
 
 func TestUnstableStableTo(t *testing.T) {
 	tests := []struct {
-		entries          []pb.Entry
+		entries          []*pb.Entry
 		offset           uint64
 		offsetInProgress uint64
 		snap             *pb.Snapshot
@@ -420,7 +420,7 @@ func TestUnstableStableTo(t *testing.T) {
 		wlen              int
 	}{
 		{
-			[]pb.Entry{}, 0, 0, nil,
+			[]*pb.Entry{}, 0, 0, nil,
 			5, 1,
 			0, 0, 0,
 		},
@@ -456,32 +456,32 @@ func TestUnstableStableTo(t *testing.T) {
 		},
 		// with snapshot
 		{
-			index(5).terms(1), 5, 6, &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			index(5).terms(1), 5, 6, &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			5, 1, // stable to the first entry
 			6, 6, 0,
 		},
 		{
-			index(5).terms(1, 1), 5, 6, &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			index(5).terms(1, 1), 5, 6, &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			5, 1, // stable to the first entry
 			6, 6, 1,
 		},
 		{
-			index(5).terms(1, 1), 5, 7, &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			index(5).terms(1, 1), 5, 7, &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			5, 1, // stable to the first entry and in-progress ahead
 			6, 7, 1,
 		},
 		{
-			index(6).terms(2), 6, 7, &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 5, Term: 1}},
+			index(6).terms(2), 6, 7, &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(5)), Term: new(uint64(1))}},
 			6, 1, // stable to the first entry and term mismatch
 			6, 7, 1,
 		},
 		{
-			index(5).terms(1), 5, 6, &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 1}},
+			index(5).terms(1), 5, 6, &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(1))}},
 			4, 1, // stable to snapshot
 			5, 6, 1,
 		},
 		{
-			index(5).terms(2), 5, 6, &pb.Snapshot{Metadata: pb.SnapshotMetadata{Index: 4, Term: 2}},
+			index(5).terms(2), 5, 6, &pb.Snapshot{Metadata: &pb.SnapshotMetadata{Index: new(uint64(4)), Term: new(uint64(2))}},
 			4, 1, // stable to old entry
 			5, 6, 1,
 		},
@@ -506,15 +506,15 @@ func TestUnstableStableTo(t *testing.T) {
 
 func TestUnstableTruncateAndAppend(t *testing.T) {
 	tests := []struct {
-		entries          []pb.Entry
+		entries          []*pb.Entry
 		offset           uint64
 		offsetInProgress uint64
 		snap             *pb.Snapshot
-		toappend         []pb.Entry
+		toappend         []*pb.Entry
 
 		woffset           uint64
 		woffsetInProgress uint64
-		wentries          []pb.Entry
+		wentries          []*pb.Entry
 	}{
 		// append to the end
 		{

@@ -26,7 +26,7 @@ import (
 
 const StateTraceDeployed = false
 
-type TraceLogger interface{}
+type TraceLogger any
 
 type TracingEvent struct{}
 
@@ -36,7 +36,7 @@ func traceReady(*raft) {}
 
 func traceCommit(*raft) {}
 
-func traceReplicate(*raft, ...raftpb.Entry) {}
+func traceReplicate(*raft, ...*raftpb.Entry) {}
 
 func traceBecomeFollower(*raft) {}
 
