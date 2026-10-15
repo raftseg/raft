@@ -131,6 +131,13 @@ func TestGoSumAllowedOnly(t *testing.T) {
 // importAllowed reports whether an import path is in the standard library
 // (no dot in its first element), this module or an allowed module.
 func importAllowed(p string) bool {
+	first, _, _ := strings.Cut(p, "/")
+	return inAllowedModule(p) || !strings.Contains(first, ".")
+}
+
+// inAllowedModule reports whether a package path is in this module or an
+// allowed module.
+func inAllowedModule(p string) bool {
 	if p == modulePath || strings.HasPrefix(p, modulePath+"/") {
 		return true
 	}
@@ -139,8 +146,7 @@ func importAllowed(p string) bool {
 			return true
 		}
 	}
-	first, _, _ := strings.Cut(p, "/")
-	return !strings.Contains(first, ".")
+	return false
 }
 
 // Every Go file, tests included and whatever its build tags, imports only
@@ -196,7 +202,10 @@ func TestImportsAllowedOnly(t *testing.T) {
 
 // Every package a build of this module compiles, tests included, comes from
 // the standard library, this module or an allowed module: what the allowed
-// modules import counts too.
+// modules import counts too. The go command says which packages are the
+// standard library's, so any other package must be in this module or an
+// allowed one, dot in its path or not (a go.work workspace can supply a
+// module named "tools").
 func TestCompiledPackagesAllowedOnly(t *testing.T) {
 	cmd := exec.Command("go", "list", "-deps", "-test", "-f", "{{if not .Standard}}{{.ImportPath}}{{end}}", "./...")
 	cmd.Dir = moduleRoot(t)
@@ -213,7 +222,7 @@ func TestCompiledPackagesAllowedOnly(t *testing.T) {
 		p = strings.TrimSuffix(p, ".test") // a package's test binary
 		p = strings.TrimSuffix(p, "_test") // a package's external tests
 		n++
-		if !importAllowed(p) {
+		if !inAllowedModule(p) {
 			t.Errorf("a build compiles %s", p)
 		}
 	}
