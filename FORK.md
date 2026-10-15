@@ -115,7 +115,13 @@ entries are applied, and the leader retries. Test:
 `Ready` that held only a snapshot and a new commit index. An application
 that honoured it could acknowledge a snapshot, lose it in a crash, and
 restart with an empty log. The leader's next heartbeat then panicked the
-node. Test: `TestMustSyncSnapshot`.
+node. Test: `TestMustSyncSnapshot`. Upstream's data-driven scenarios that
+show such a `Ready` now show `MustSync=true`: `confchange_v1_add_single`,
+`confchange_v2_add_double_auto`, `confchange_v2_add_double_implicit`,
+`confchange_v2_add_single_auto`, `confchange_v2_add_single_explicit`,
+`confchange_v2_replace_leader`, `snapshot_succeed_via_app_resp` and
+`snapshot_succeed_via_app_resp_behind` (in `testdata/`); that is their
+only change.
 
 ## Linearizable reads
 
@@ -194,8 +200,10 @@ Now such a leader does the following:
 - It is exempt from CheckQuorum, and it confirms reads through a quorum.
 - With `StepDownOnRemoval`, it steps down once it has sent `MsgTimeoutNow`.
 
-Tests: `TestDemotedLeaderHandsOff`, and the updated
-`testdata/confchange_*_leader*.txt` scenarios.
+Tests: `TestDemotedLeaderHandsOff`, and the updated scenarios
+`testdata/confchange_v1_remove_leader.txt`,
+`confchange_v1_remove_leader_stepdown.txt` and
+`confchange_v2_replace_leader_stepdown.txt`.
 
 **A transfer waits for pending configuration changes.** The
 `MsgTimeoutNow` of a hand-off often arrives together with the commit of the
