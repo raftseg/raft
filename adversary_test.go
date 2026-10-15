@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	pb "github.com/raftseg/raft/raftpb"
 )
@@ -299,7 +300,47 @@ func hostileMessage(src *byteSource, rn *RawNode) *pb.Message {
 	if src.intn(12) == 0 {
 		m.Responses = []*pb.Message{{Type: pb.MsgAppResp.Enum(), From: new(r.id), To: new(r.id)}}
 	}
+	// Messages are protobuf pointers: fields can be unset rather than zero,
+	// at any depth, and the message can come from damaged bytes, with
+	// fields this version does not know. The transport still sets From to
+	// the authenticated sender: a message without one is the node's own.
+	from := m.GetFrom()
+	if src.intn(4) == 0 {
+		unsetSome(src, m.ProtoReflect())
+	}
+	if src.intn(8) == 0 {
+		b, _ := proto.Marshal(m)
+		for k := 1 + src.intn(3); k > 0 && len(b) > 0; k-- {
+			b[src.intn(len(b))] ^= src.byte() | 1
+		}
+		if d := (&pb.Message{}); proto.Unmarshal(b, d) == nil {
+			m = d
+		}
+	}
+	m.From = new(from)
 	return m
+}
+
+// unsetSome clears some of the fields set in m and the messages within it.
+func unsetSome(src *byteSource, m protoreflect.Message) {
+	var set []protoreflect.FieldDescriptor
+	m.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+		set = append(set, fd)
+		switch {
+		case fd.IsList() && fd.Kind() == protoreflect.MessageKind:
+			for i := 0; i < v.List().Len(); i++ {
+				unsetSome(src, v.List().Get(i).Message())
+			}
+		case fd.Kind() == protoreflect.MessageKind:
+			unsetSome(src, v.Message())
+		}
+		return true
+	})
+	for _, fd := range set {
+		if src.intn(5) == 0 {
+			m.Clear(fd)
+		}
+	}
 }
 
 func runAdversary(t *testing.T, data []byte) {

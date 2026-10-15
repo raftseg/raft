@@ -257,7 +257,8 @@ A limit of 0 now applies one entry at a time. Test:
 **`ValidateMessage`.** `RawNode.Step` and `Node.Step` check every message
 from a peer. A message from a peer is one with a sender other than the
 node itself or its storage threads. The check rejects:
-- local message types (including `MsgForgetLeader`);
+- local message types (including `MsgForgetLeader`), and types outside the
+  enum;
 - reserved or missing node IDs;
 - local response lists;
 - entries out of order, or from a term above the message's term;
@@ -277,6 +278,14 @@ unchanged by followers, so their `From` is the node that made the request.
 Tests: `TestValidateMessage`, `TestValidateMessagePointers`,
 `TestStepValidates`, `TestUndecodableConfChangeDoesNotPanicLeader`,
 `FuzzStepHostile`.
+
+**Message types outside the enum.** protobuf decodes any int32 into an
+enum field, and upstream's `IsLocalMsg` and `IsResponseMsg` indexed an
+array with the type: a negative type in a message from a peer panicked
+`RawNode.Step` before validation. Negative types are now neither local nor
+responses, and validation rejects them. Found by `FuzzStepHostile` once it
+stepped messages decoded from damaged bytes. Test:
+`TestNegativeMessageType`.
 
 **Forwarded requests are copies.** A follower passes proposals, reads and
 transfer requests to its leader. Upstream readdressed the message given to

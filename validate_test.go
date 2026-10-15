@@ -282,3 +282,20 @@ func TestStepNil(t *testing.T) {
 		t.Error("Node.Step(nil) succeeded")
 	}
 }
+
+// A message type outside the enum, as protobuf decodes any int32 into it,
+// is refused without a panic. Upstream's IsLocalMsg and IsResponseMsg
+// indexed an array with a negative type, so RawNode.Step panicked on such
+// a message from a peer before validating it. Found by FuzzStepHostile.
+func TestNegativeMessageType(t *testing.T) {
+	for _, typ := range []pb.MessageType{-1, -1751120486, 24, 1 << 30} {
+		if IsLocalMsg(typ) || IsResponseMsg(typ) {
+			t.Errorf("type %d is local or a response", typ)
+		}
+		rn := newTestRawNode(1, 10, 1, newTestMemoryStorage(withPeers(1, 2, 3)))
+		m := &pb.Message{Type: typ.Enum(), From: new(uint64(2)), To: new(uint64(1)), Term: new(uint64(1))}
+		if err := rn.Step(m); !errors.Is(err, ErrInvalidMessage) {
+			t.Errorf("type %d: %v", typ, err)
+		}
+	}
+}

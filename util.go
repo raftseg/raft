@@ -13,7 +13,8 @@
 // limitations under the License.
 //
 // Modified by the raftseg authors: import paths rewritten for this
-// fork's module.
+// fork's module; a negative message type is neither local nor a response
+// (see isMsgInArray), where upstream panicked.
 
 package raft
 
@@ -56,7 +57,10 @@ var isResponseMsg = [...]bool{
 
 func isMsgInArray(msgt pb.MessageType, arr []bool) bool {
 	i := int(msgt)
-	return i < len(arr) && arr[i]
+	// Fork: a negative type is in no array. Upstream indexed arr with it
+	// and panicked: protobuf decodes any int32 into an enum field, so a
+	// damaged message from a peer crashed RawNode.Step before validation.
+	return i >= 0 && i < len(arr) && arr[i]
 }
 
 func IsLocalMsg(msgt pb.MessageType) bool {
